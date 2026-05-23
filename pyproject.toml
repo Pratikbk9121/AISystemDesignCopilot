@@ -15,8 +15,8 @@ dependencies = [
     "langchain-anthropic>=0.2.0",
     "langchain-community>=0.3.0",
     "langchain-core>=0.3.0",
-    "langgraph>=0.2.0",
     "faiss-cpu>=1.9.0",
+    "qdrant-client>=1.11.0",
     "sentence-transformers>=3.3.0",
     "redis>=5.2.0",
     "python-multipart>=0.0.17",
@@ -56,3 +56,12 @@ python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+markers = [
+  "integration: tests that require external services (Redis, Qdrant)",
+  "slow: tests that are slow",
+]

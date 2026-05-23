@@ -138,13 +138,56 @@ class TokenUsage(BaseModel):
     estimated_cost_usd: float = 0.0
 
 
+class ToolCall(BaseModel):
+    """
+    Record of one LLM tool/function call made during architecture generation.
+    """
+    name: str = Field(..., description="Tool name as registered (e.g. 'estimate_capacity').")
+    args: dict[str, Any] = Field(default_factory=dict, description="Arguments the model passed.")
+    result: dict[str, Any] = Field(default_factory=dict, description="Tool result returned to the model.")
+
+
+class ConfidenceMetrics(BaseModel):
+    """
+    Confidence metrics for RAG response quality
+    """
+    overall_confidence: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Overall confidence score (0.0 - 1.0)"
+    )
+    confidence_level: str = Field(
+        ...,
+        description="Confidence level (HIGH, MEDIUM, LOW, VERY_LOW)"
+    )
+    retrieval_confidence: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Confidence based on retrieval quality"
+    )
+    coverage_confidence: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Confidence based on query coverage"
+    )
+    num_docs_retrieved: int = Field(..., description="Number of documents retrieved")
+    avg_similarity_score: float = Field(..., description="Average similarity score of retrieved docs")
+    recommendation: str = Field(..., description="Recommendation based on confidence")
+
+
 class SystemDesignResponse(BaseModel):
     """
     Response model containing the complete system design
     """
     query: str = Field(..., description="Original user query")
     session_id: str = Field(..., description="Session ID for this conversation")
-    architecture: SystemArchitecture = Field(..., description="Structured architecture design")
+    architecture: SystemArchitecture | None = Field(
+        default=None,
+        description="Structured architecture design (None if insufficient knowledge)"
+    )
     explanation: str = Field(..., description="Detailed explanation of the design")
     evaluation: EvaluationResult | None = Field(
         default=None,
@@ -157,6 +200,30 @@ class SystemDesignResponse(BaseModel):
     retrieved_context: list[str] = Field(
         default_factory=list,
         description="Retrieved document chunks used for RAG"
+    )
+    confidence_metrics: ConfidenceMetrics | None = Field(
+        default=None,
+        description="Confidence metrics for response quality"
+    )
+    insufficient_knowledge: bool = Field(
+        default=False,
+        description="True if hallucination guard blocked generation due to insufficient knowledge"
+    )
+    knowledge_gap_details: dict[str, Any] | None = Field(
+        default=None,
+        description="Details about why knowledge was insufficient (when insufficient_knowledge=True)"
+    )
+    confidence_warning: str | None = Field(
+        default=None,
+        description="Warning message for medium-confidence responses (0.3-0.6 range)"
+    )
+    revision_count: int = Field(
+        default=0,
+        description="Number of reflection/revise passes performed (0 = first-shot design)"
+    )
+    tool_calls: list[ToolCall] = Field(
+        default_factory=list,
+        description="LLM tool/function calls executed during generation (e.g. capacity estimates)."
     )
     timestamp: datetime = Field(default_factory=datetime.now)
 

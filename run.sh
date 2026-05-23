@@ -29,15 +29,8 @@ if [ ! -f ".env" ]; then
     exit 1
 fi
 
-# Check if vector database is initialized
-if [ ! -d "data/vector_store/faiss_index" ]; then
-    echo "📚 Vector database not initialized."
-    read -p "Would you like to initialize it now with sample data? (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        python scripts/initialize_vector_db.py
-    fi
-fi
+# Note: Qdrant runs in-memory by default (no persistence check needed)
+# To initialize with sample data, run: python scripts/initialize_qdrant.py
 
 # Start the server
 echo ""

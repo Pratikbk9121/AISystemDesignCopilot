@@ -1,25 +1,23 @@
 """
-Prompt templates for system design generation using LangChain
+Prompt templates for system design generation
 """
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 
 class PromptTemplates:
     """
     Collection of prompt templates for system design tasks.
-    Uses LangChain's ChatPromptTemplate for dynamic prompt construction.
+    Simple string-based templates for use with OpenAI SDK.
     """
-    
+
     @staticmethod
-    def get_system_design_prompt() -> ChatPromptTemplate:
+    def get_system_design_prompt() -> str:
         """
-        Main prompt template for generating system designs.
-        Includes RAG context, conversation history, and strict output formatting.
-        
+        Main system message for generating system designs.
+
         Returns:
-            ChatPromptTemplate for system design generation
+            System message string
         """
-        system_message = """You are a Senior System Architect and Principal Engineer with 15+ years of experience designing large-scale distributed systems at companies like Google, Amazon, and Netflix.
+        return """You are a Senior System Architect and Principal Engineer with 15+ years of experience designing large-scale distributed systems at companies like Google, Amazon, and Netflix.
 
 Your role is to help users design robust, scalable system architectures for real-world applications.
 
@@ -36,6 +34,14 @@ APPROACH:
 3. Design a practical, production-ready architecture
 4. Explain your reasoning clearly
 5. Highlight important trade-offs and alternatives
+
+TOOLS:
+You have an ``estimate_capacity`` tool available. Call it ONLY when the user has
+explicitly given concrete scale parameters (DAU, ops/user/day, payload size).
+When you call it, use its QPS / storage / bandwidth numbers verbatim in your
+scaling_strategy explanation to justify sharding, caching, and replication
+choices. DO NOT call the tool with guessed numbers if the user did not provide
+them — proceed directly to the qualitative design instead.
 
 OUTPUT FORMAT:
 You MUST respond with a valid JSON object matching this exact structure:
@@ -66,9 +72,26 @@ You MUST respond with a valid JSON object matching this exact structure:
 
 Be specific, practical, and production-focused. Avoid generic answers."""
 
-        template = ChatPromptTemplate.from_messages([
-            ("system", system_message),
-            ("human", """RETRIEVED DOCUMENTATION CONTEXT:
+    @staticmethod
+    def format_system_design_user_prompt(
+        query: str,
+        retrieved_context: str = "",
+        chat_history: str = "",
+        additional_context: str = ""
+    ) -> str:
+        """
+        Format the user prompt for system design generation.
+
+        Args:
+            query: User's system design question
+            retrieved_context: Retrieved documentation from RAG
+            chat_history: Previous conversation messages
+            additional_context: Any additional context
+
+        Returns:
+            Formatted user prompt
+        """
+        return f"""RETRIEVED DOCUMENTATION CONTEXT:
 {retrieved_context}
 
 CONVERSATION HISTORY:
@@ -80,20 +103,17 @@ ADDITIONAL CONTEXT:
 USER QUERY:
 {query}
 
-Please design a system architecture that addresses this requirement. Respond with the JSON structure specified in the system message.""")
-        ])
-        
-        return template
-    
+Please design a system architecture that addresses this requirement. Respond with the JSON structure specified in the system message."""
+
     @staticmethod
-    def get_evaluation_prompt() -> ChatPromptTemplate:
+    def get_evaluation_prompt() -> str:
         """
-        Prompt template for evaluating generated system designs.
-        
+        System message for evaluating generated system designs.
+
         Returns:
-            ChatPromptTemplate for design evaluation
+            System message string
         """
-        system_message = """You are an expert System Design Evaluator and Technical Interviewer.
+        return """You are an expert System Design Evaluator and Technical Interviewer.
 
 Your role is to critically evaluate system design architectures and provide constructive feedback.
 
@@ -120,11 +140,31 @@ OUTPUT FORMAT (JSON):
   "completeness_score": 0.8
 }}
 
+IMPORTANT:
+- Use NUMERIC values for confidence_score and completeness_score (e.g., 0.85, not "zero point eight five")
+- Respond with ONLY valid JSON, no markdown formatting
+- All scores must be decimal numbers between 0.0 and 1.0
+
 Be fair, specific, and actionable in your feedback."""
 
-        template = ChatPromptTemplate.from_messages([
-            ("system", system_message),
-            ("human", """ORIGINAL QUERY:
+    @staticmethod
+    def format_evaluation_user_prompt(
+        query: str,
+        design: str,
+        context: str = ""
+    ) -> str:
+        """
+        Format the user prompt for design evaluation.
+
+        Args:
+            query: Original user query
+            design: Generated system design to evaluate
+            context: Retrieved context that was used
+
+        Returns:
+            Formatted user prompt
+        """
+        return f"""ORIGINAL QUERY:
 {query}
 
 GENERATED SYSTEM DESIGN:
@@ -135,21 +175,17 @@ RETRIEVED CONTEXT USED:
 
 Please evaluate this system design. Provide a confidence score (0.0-1.0), identify strengths and weaknesses, suggest improvements, check for hallucinations, and rate completeness (0.0-1.0).
 
-Respond with the JSON structure specified in the system message.""")
-        ])
-        
-        return template
-    
+Respond with the JSON structure specified in the system message."""
+
     @staticmethod
-    def get_refinement_prompt() -> ChatPromptTemplate:
+    def get_refinement_prompt() -> str:
         """
-        Prompt template for refining/mutating existing architectures.
-        Useful for follow-up queries like "scale this to 10M users".
-        
+        System message for refining/mutating existing architectures.
+
         Returns:
-            ChatPromptTemplate for architecture refinement
+            System message string
         """
-        system_message = """You are a Senior System Architect specializing in system evolution and scaling.
+        return """You are a Senior System Architect specializing in system evolution and scaling.
 
 Your role is to refine and adapt existing system architectures based on new requirements or constraints.
 
@@ -162,9 +198,26 @@ APPROACH:
 
 Maintain the same JSON output format as the original design, but focus on the delta/changes."""
 
-        template = ChatPromptTemplate.from_messages([
-            ("system", system_message),
-            ("human", """CURRENT ARCHITECTURE:
+    @staticmethod
+    def format_refinement_user_prompt(
+        current_design: str,
+        refinement_query: str,
+        chat_history: str = "",
+        retrieved_context: str = ""
+    ) -> str:
+        """
+        Format the user prompt for architecture refinement.
+
+        Args:
+            current_design: Current system architecture
+            refinement_query: New requirement or refinement request
+            chat_history: Previous conversation messages
+            retrieved_context: Retrieved documentation from RAG
+
+        Returns:
+            Formatted user prompt
+        """
+        return f"""CURRENT ARCHITECTURE:
 {current_design}
 
 CONVERSATION HISTORY:
@@ -176,7 +229,151 @@ NEW REQUIREMENT/REFINEMENT REQUEST:
 RETRIEVED CONTEXT:
 {retrieved_context}
 
-Please refine the architecture to address this new requirement. Respond with the complete updated JSON structure, highlighting what changed and why.""")
-        ])
-        
-        return template
+Please refine the architecture to address this new requirement. Respond with the complete updated JSON structure, highlighting what changed and why."""
+
+    @staticmethod
+    def get_revision_prompt() -> str:
+        """
+        System message for revising a design based on evaluator feedback.
+
+        Used inside the reflection loop: the evaluator scored the prior
+        design below threshold and provided weaknesses/suggestions; this
+        prompt asks the model to produce an improved JSON architecture in
+        the same schema, explicitly addressing the feedback.
+        """
+        return """You are a Senior System Architect revising a previous design based on critical evaluator feedback.
+
+You will receive:
+- The ORIGINAL user query
+- The PRIOR design you produced (as JSON)
+- EVALUATOR FEEDBACK identifying weaknesses and concrete suggestions
+- RETRIEVED DOCUMENTATION CONTEXT
+
+Your job is to produce an IMPROVED design that:
+1. Explicitly addresses every weakness in the evaluator feedback
+2. Incorporates the evaluator's suggestions where reasonable
+3. Preserves the parts of the prior design that were sound
+4. Stays consistent with the retrieved documentation
+
+OUTPUT FORMAT:
+You MUST respond with a valid JSON object matching this exact structure (same schema as the original design):
+{{
+  "services": ["list", "of", "microservices"],
+  "database": "database architecture description",
+  "scaling_strategy": "how the system scales",
+  "tradeoffs": [
+    {{
+      "aspect": "what is being compared",
+      "options": ["option1", "option2"],
+      "recommendation": "recommended choice with reasoning",
+      "considerations": ["consideration 1", "consideration 2"]
+    }}
+  ],
+  "key_components": {{ "Component Name": "detailed role" }},
+  "data_flow": "description of how data flows through the system",
+  "api_design": ["key API endpoints or contracts"],
+  "non_functional_requirements": {{ "Availability": "...", "Latency": "...", "Scalability": "..." }},
+  "explanation": "comprehensive explanation that calls out what changed from the prior design and why"
+}}
+
+Be specific. Do not regress on aspects that were already good — only fix what the evaluator flagged."""
+
+    @staticmethod
+    def format_revision_user_prompt(
+        original_query: str,
+        prior_design: str,
+        evaluator_feedback: str,
+        retrieved_context: str = "",
+        chat_history: str = "",
+    ) -> str:
+        """
+        Format the user prompt for a revision pass.
+
+        Args:
+            original_query: The user's original system-design question
+            prior_design: JSON-stringified prior architecture
+            evaluator_feedback: Stringified evaluation (weaknesses + suggestions)
+            retrieved_context: RAG context
+            chat_history: Recent conversation messages
+
+        Returns:
+            Formatted user prompt
+        """
+        return f"""ORIGINAL USER QUERY:
+{original_query}
+
+PRIOR DESIGN (to be improved):
+{prior_design}
+
+EVALUATOR FEEDBACK (must be addressed):
+{evaluator_feedback}
+
+RETRIEVED DOCUMENTATION CONTEXT:
+{retrieved_context}
+
+CONVERSATION HISTORY:
+{chat_history}
+
+Produce an improved design that fixes every weakness above. Respond with the JSON structure specified in the system message."""
+
+    # Fallback prompts (simpler versions in case primary fails)
+
+    @staticmethod
+    def get_simple_system_design_prompt() -> str:
+        """
+        Simplified fallback system message for generating system designs.
+
+        Returns:
+            Simplified system message string
+        """
+        return """You are a system architect. Design a scalable system architecture.
+
+Output valid JSON with this structure:
+{
+  "services": ["service1", "service2"],
+  "database": "database description",
+  "scaling_strategy": "how to scale",
+  "tradeoffs": [],
+  "key_components": {},
+  "data_flow": "data flow description",
+  "api_design": [],
+  "non_functional_requirements": {},
+  "explanation": "explanation of design"
+}
+
+Be specific and practical."""
+
+    @staticmethod
+    def get_simple_evaluation_prompt() -> str:
+        """
+        Simplified fallback system message for evaluation.
+
+        Returns:
+            Simplified evaluation message
+        """
+        return """Evaluate this system design. Respond with JSON:
+
+{
+  "confidence_score": 0.7,
+  "strengths": ["strength1"],
+  "weaknesses": ["weakness1"],
+  "suggestions": ["suggestion1"],
+  "hallucination_check": true,
+  "completeness_score": 0.7
+}"""
+
+    @staticmethod
+    def format_simple_user_prompt(query: str, context: str = "") -> str:
+        """
+        Simplified user prompt as fallback.
+
+        Args:
+            query: User query
+            context: Optional context
+
+        Returns:
+            Simple formatted prompt
+        """
+        if context:
+            return f"Context:\n{context}\n\nQuery: {query}\n\nProvide system design in JSON format."
+        return f"Query: {query}\n\nProvide system design in JSON format."

@@ -1,11 +1,12 @@
 """
-LLM integration layer using LangChain
+LLM integration layer using OpenAI SDK for Tekion Bifrost
 """
-from .client import LLMClient
-from .prompts import PromptTemplates
-from .parser import StructuredOutputParser
+from app.core.llm.client import CachedLLMClient, LLMClient
+from app.core.llm.parser import StructuredOutputParser
+from app.core.llm.prompts import PromptTemplates
 
 __all__ = [
+    "CachedLLMClient",
     "LLMClient",
     "PromptTemplates",
     "StructuredOutputParser",

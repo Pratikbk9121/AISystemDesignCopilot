@@ -1,11 +1,11 @@
 """
-LangGraph state machine for conversational system design
+System design workflow state machine
 """
-from .state import SystemDesignState, ConversationContext
-from .graph import SystemDesignGraph
+from app.core.graph.graph import SystemDesignGraph
+from app.core.graph.state import ConversationContext, SystemDesignState
 
 __all__ = [
-    "SystemDesignState",
     "ConversationContext",
     "SystemDesignGraph",
+    "SystemDesignState",
 ]

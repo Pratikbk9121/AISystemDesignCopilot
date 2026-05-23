@@ -1,24 +1,26 @@
 """
 Pydantic models for API requests and responses
 """
-from .schemas import (
-    SystemDesignQuery,
-    SystemDesignResponse,
-    ConversationMessage,
+from app.models.schemas import (
+    ConfidenceMetrics,
     ConversationHistory,
+    ConversationMessage,
     EvaluationResult,
     SystemArchitecture,
-    TradeOff,
+    SystemDesignQuery,
+    SystemDesignResponse,
     TokenUsage,
+    TradeOff,
 )
 
 __all__ = [
-    "SystemDesignQuery",
-    "SystemDesignResponse",
-    "ConversationMessage",
+    "ConfidenceMetrics",
     "ConversationHistory",
+    "ConversationMessage",
     "EvaluationResult",
     "SystemArchitecture",
-    "TradeOff",
+    "SystemDesignQuery",
+    "SystemDesignResponse",
     "TokenUsage",
+    "TradeOff",
 ]

@@ -19,9 +19,12 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.env
+.env.example
 
 # Virtual Environment
 venv/
+.venv/
 env/
 ENV/
 
@@ -44,6 +47,8 @@ data/
 # Logs
 *.log
 logs/
+stream_output.txt
+backend.log
 
 # Testing
 .pytest_cache/

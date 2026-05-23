@@ -1,0 +1,171 @@
+{
+  "version": "1",
+  "description": "Golden set for the AI System Design Copilot. Queries cover the 6 documented topics (Netflix, Uber, WhatsApp, URL shortener, Twitter, Dropbox), plus capacity-tool prompts and intentional out-of-domain probes.",
+  "queries": [
+    {
+      "id": "core-01-url-shortener",
+      "query": "Design a URL shortener like bit.ly. Cover the encoding scheme, database, caching, and how you'd handle billions of links.",
+      "topic": "url_shortener",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "core-02-twitter",
+      "query": "Design Twitter's home timeline. Explain the fanout-on-write vs fanout-on-read tradeoff and how you'd handle celebrity users.",
+      "topic": "twitter",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "core-03-whatsapp",
+      "query": "Design WhatsApp messaging including 1-1 chats, group chats, presence, and end-to-end encryption.",
+      "topic": "whatsapp",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "core-04-netflix",
+      "query": "Design Netflix's video streaming pipeline from upload to playback. Cover transcoding, CDN, and adaptive bitrate.",
+      "topic": "netflix",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "core-05-uber",
+      "query": "Design Uber's ride-matching service. Explain how drivers and riders are matched in real time and how location updates are handled.",
+      "topic": "uber",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "core-06-dropbox",
+      "query": "Design Dropbox's file storage and sync. Cover chunking, deduplication, conflict resolution, and how clients stay in sync.",
+      "topic": "dropbox",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+
+    {
+      "id": "scale-01-twitter-100m",
+      "query": "Design Twitter for 100 million daily active users who write 5 tweets/day and read 100 tweets/day, with an average tweet size of 1 KB. Show concrete QPS and storage estimates and justify your sharding strategy.",
+      "topic": "twitter",
+      "expects_tool_call": true,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "scale-02-whatsapp-2b",
+      "query": "Design WhatsApp for 2 billion daily active users sending 40 messages/day averaging 0.5 KB each. Justify your database and message storage choices with explicit numbers.",
+      "topic": "whatsapp",
+      "expects_tool_call": true,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "scale-03-netflix-500m",
+      "query": "Design Netflix for 500 million daily active users, each watching on average 2 hours/day at 5000 kbps. Compute the CDN bandwidth and origin storage requirements and design accordingly.",
+      "topic": "netflix",
+      "expects_tool_call": true,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "scale-04-uber-50m",
+      "query": "Design Uber for 50 million daily active users with 30 location updates per active trip per hour and an average payload of 0.3 KB. Show QPS and choose appropriate stream-processing infrastructure.",
+      "topic": "uber",
+      "expects_tool_call": true,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "scale-05-shortener-1b",
+      "query": "Design a URL shortener for 1 billion writes/month and 50 billion reads/month with an average payload of 0.2 KB. Compute cache hit-ratio impact and choose a database.",
+      "topic": "url_shortener",
+      "expects_tool_call": true,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "scale-06-dropbox-1pb",
+      "query": "Design Dropbox to ingest 1 PB of new files per month from 100 million daily active users uploading on average 0.5 files/day at 10 MB each. Plan storage and bandwidth.",
+      "topic": "dropbox",
+      "expects_tool_call": true,
+      "expects_guard_trigger": false
+    },
+
+    {
+      "id": "aspect-01-twitter-fanout",
+      "query": "For a Twitter-like service, walk through the fanout-on-write vs fanout-on-read tradeoff. When would you use each, and how would a hybrid approach work?",
+      "topic": "twitter",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "aspect-02-uber-geo",
+      "query": "For Uber's matching service, compare geohashing vs quad-trees vs S2 cells for indexing driver locations. Which would you pick and why?",
+      "topic": "uber",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "aspect-03-netflix-cdn",
+      "query": "Explain Netflix's Open Connect CDN strategy. Why peer with ISPs directly, what gets cached at the edge, and how is content prepositioned?",
+      "topic": "netflix",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "aspect-04-dropbox-sync",
+      "query": "For Dropbox sync, how would you detect file changes efficiently on the client and resolve conflicts when two clients edit the same file offline?",
+      "topic": "dropbox",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "aspect-05-whatsapp-e2ee",
+      "query": "For WhatsApp's end-to-end encryption, explain how the Signal protocol's double ratchet works and what happens when a user adds a new device to an existing group chat.",
+      "topic": "whatsapp",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+
+    {
+      "id": "refine-01-shortener-analytics",
+      "query": "Take a typical URL shortener design and refine it to add real-time analytics (click counts, geo, referrer). What components do you add and what database choices change?",
+      "topic": "url_shortener",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "refine-02-twitter-search",
+      "query": "Refine a Twitter timeline architecture to add full-text search across all tweets in the last 7 days. What infrastructure do you add?",
+      "topic": "twitter",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+    {
+      "id": "refine-03-uber-surge",
+      "query": "Take a baseline Uber design and add surge pricing. Describe the signals it needs, where the surge-pricing service lives, and how it talks to matching.",
+      "topic": "uber",
+      "expects_tool_call": false,
+      "expects_guard_trigger": false
+    },
+
+    {
+      "id": "ood-01-quantum-banking",
+      "query": "Design a quantum-encrypted blockchain for a planetary central bank that settles 10^18 transactions per second.",
+      "topic": "out_of_domain",
+      "expects_tool_call": false,
+      "expects_guard_trigger": true
+    },
+    {
+      "id": "ood-02-niche-medical",
+      "query": "Design the radiomics pipeline for federated tumor-volume estimation across 200 hospitals with HIPAA-compliant differential privacy.",
+      "topic": "out_of_domain",
+      "expects_tool_call": false,
+      "expects_guard_trigger": true
+    },
+    {
+      "id": "ood-03-game-mmo",
+      "query": "Design the persistent-world server architecture for an MMORPG with 1 million concurrent players sharing one shard with sub-100ms tick rate.",
+      "topic": "out_of_domain",
+      "expects_tool_call": false,
+      "expects_guard_trigger": true
+    }
+  ]
+}

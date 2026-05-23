@@ -1,0 +1,295 @@
+{
+  "timestamp": "2026-05-17T16-13-21",
+  "config": {
+    "url": "http://localhost:8000",
+    "judge_model": null,
+    "n_queries": 5,
+    "label": "smoke"
+  },
+  "summary": {
+    "n_queries": 5,
+    "overall_score": 8.7,
+    "in_domain_score": 8.7,
+    "by_dimension": {
+      "completeness": 9.0,
+      "scalability_reasoning": 8.0,
+      "tradeoff_coverage": 8.8,
+      "factuality": 9.0
+    },
+    "tool_use": {
+      "fired_when_expected": 0,
+      "expected_count": 0,
+      "fired_when_not_expected": 5,
+      "not_expected_count": 5,
+      "precision": 0.0,
+      "recall": 0.0
+    },
+    "ood_refusal": {
+      "correct": 0,
+      "total": 0,
+      "accuracy": null
+    }
+  },
+  "results": [
+    {
+      "id": "core-01-url-shortener",
+      "query": "Design a URL shortener like bit.ly. Cover the encoding scheme, database, caching, and how you'd handle billions of links.",
+      "expectations": {
+        "topic": "url_shortener",
+        "expects_tool_call": false,
+        "expects_guard_trigger": false
+      },
+      "score": {
+        "completeness": 9,
+        "scalability_reasoning": 8,
+        "tradeoff_coverage": 9,
+        "factuality": 9,
+        "tool_used": true,
+        "appropriate_tool_use": false,
+        "guard_triggered_correctly": null,
+        "one_line_critique": "Strong design overall but lacks deeper handling of cache stampede, security, and analytics processing details, and unnecessarily invoked capacity estimation tool despite no scale numbers given.",
+        "overall": 8.75
+      },
+      "api_latency_s": 45.82,
+      "api_error": null,
+      "revision_count": 0,
+      "tool_calls": [
+        {
+          "name": "estimate_capacity",
+          "args": {
+            "avg_payload_kb": 0.1,
+            "daily_active_users": 10000000,
+            "ops_per_user_per_day": 10,
+            "peak_to_avg_ratio": 3,
+            "replication_factor": 3
+          },
+          "result": {
+            "qps_avg": 1157.4,
+            "qps_peak": 3472.2,
+            "yearly_storage_gb_raw": 3480.9,
+            "yearly_storage_gb_replicated": 10442.7,
+            "avg_bandwidth_mbps": 0.95,
+            "peak_bandwidth_mbps": 2.84,
+            "replication_factor": 3,
+            "peak_to_avg_ratio": 3,
+            "_notes": "qps_peak = qps_avg * peak_to_avg_ratio (rule of thumb for diurnal traffic). Replicated storage assumes synchronous N-way replication. Bandwidth excludes protocol overhead and TLS expansion (~10-20% real-world tax)."
+          }
+        }
+      ],
+      "token_usage": {
+        "prompt_tokens": 6355,
+        "completion_tokens": 1609,
+        "total_tokens": 7964,
+        "estimated_cost_usd": 0.005116
+      }
+    },
+    {
+      "id": "core-02-twitter",
+      "query": "Design Twitter's home timeline. Explain the fanout-on-write vs fanout-on-read tradeoff and how you'd handle celebrity users.",
+      "expectations": {
+        "topic": "twitter",
+        "expects_tool_call": false,
+        "expects_guard_trigger": false
+      },
+      "score": {
+        "completeness": 9,
+        "scalability_reasoning": 8,
+        "tradeoff_coverage": 9,
+        "factuality": 9,
+        "tool_used": true,
+        "appropriate_tool_use": false,
+        "guard_triggered_correctly": null,
+        "one_line_critique": "The response lacks detailed explanation on efficient fan-out on read aggregation for celebrities and omits operational concerns like rate limiting and error handling.",
+        "overall": 8.75
+      },
+      "api_latency_s": 45.81,
+      "api_error": null,
+      "revision_count": 0,
+      "tool_calls": [
+        {
+          "name": "estimate_capacity",
+          "args": {
+            "daily_active_users": 350000000,
+            "avg_payload_kb": 1,
+            "ops_per_user_per_day": 5,
+            "peak_to_avg_ratio": 3,
+            "replication_factor": 3
+          },
+          "result": {
+            "qps_avg": 20254.6,
+            "qps_peak": 60763.9,
+            "yearly_storage_gb_raw": 609159.5,
+            "yearly_storage_gb_replicated": 1827478.4,
+            "avg_bandwidth_mbps": 165.93,
+            "peak_bandwidth_mbps": 497.78,
+            "replication_factor": 3,
+            "peak_to_avg_ratio": 3,
+            "_notes": "qps_peak = qps_avg * peak_to_avg_ratio (rule of thumb for diurnal traffic). Replicated storage assumes synchronous N-way replication. Bandwidth excludes protocol overhead and TLS expansion (~10-20% real-world tax)."
+          }
+        }
+      ],
+      "token_usage": {
+        "prompt_tokens": 5788,
+        "completion_tokens": 1960,
+        "total_tokens": 7748,
+        "estimated_cost_usd": 0.005451
+      }
+    },
+    {
+      "id": "core-03-whatsapp",
+      "query": "Design WhatsApp messaging including 1-1 chats, group chats, presence, and end-to-end encryption.",
+      "expectations": {
+        "topic": "whatsapp",
+        "expects_tool_call": false,
+        "expects_guard_trigger": false
+      },
+      "score": {
+        "completeness": 9,
+        "scalability_reasoning": 8,
+        "tradeoff_coverage": 8,
+        "factuality": 9,
+        "tool_used": true,
+        "appropriate_tool_use": true,
+        "guard_triggered_correctly": null,
+        "one_line_critique": "The design lacks detailed handling of multi-device sync complexities and message ordering guarantees in group chats.",
+        "overall": 8.5
+      },
+      "api_latency_s": 45.61,
+      "api_error": null,
+      "revision_count": 0,
+      "tool_calls": [
+        {
+          "name": "estimate_capacity",
+          "args": {
+            "daily_active_users": 2000000000,
+            "avg_payload_kb": 1,
+            "ops_per_user_per_day": 50,
+            "peak_to_avg_ratio": 3,
+            "replication_factor": 3
+          },
+          "result": {
+            "qps_avg": 1157407.4,
+            "qps_peak": 3472222.2,
+            "yearly_storage_gb_raw": 34809112.5,
+            "yearly_storage_gb_replicated": 104427337.6,
+            "avg_bandwidth_mbps": 9481.48,
+            "peak_bandwidth_mbps": 28444.44,
+            "replication_factor": 3,
+            "peak_to_avg_ratio": 3,
+            "_notes": "qps_peak = qps_avg * peak_to_avg_ratio (rule of thumb for diurnal traffic). Replicated storage assumes synchronous N-way replication. Bandwidth excludes protocol overhead and TLS expansion (~10-20% real-world tax)."
+          }
+        }
+      ],
+      "token_usage": {
+        "prompt_tokens": 5921,
+        "completion_tokens": 1788,
+        "total_tokens": 7709,
+        "estimated_cost_usd": 0.005229
+      }
+    },
+    {
+      "id": "core-04-netflix",
+      "query": "Design Netflix's video streaming pipeline from upload to playback. Cover transcoding, CDN, and adaptive bitrate.",
+      "expectations": {
+        "topic": "netflix",
+        "expects_tool_call": false,
+        "expects_guard_trigger": false
+      },
+      "score": {
+        "completeness": 9,
+        "scalability_reasoning": 8,
+        "tradeoff_coverage": 9,
+        "factuality": 9,
+        "tool_used": true,
+        "appropriate_tool_use": false,
+        "guard_triggered_correctly": null,
+        "one_line_critique": "Strong overall design but lacks detail on DRM, encryption, and CDN integration specifics, and unnecessarily used capacity estimation tool despite no scale numbers in query.",
+        "overall": 8.75
+      },
+      "api_latency_s": 33.99,
+      "api_error": null,
+      "revision_count": 0,
+      "tool_calls": [
+        {
+          "name": "estimate_capacity",
+          "args": {
+            "daily_active_users": 500000000,
+            "avg_payload_kb": 5000,
+            "ops_per_user_per_day": 10,
+            "peak_to_avg_ratio": 3,
+            "replication_factor": 3
+          },
+          "result": {
+            "qps_avg": 57870.4,
+            "qps_peak": 173611.1,
+            "yearly_storage_gb_raw": 8702278137.2,
+            "yearly_storage_gb_replicated": 26106834411.6,
+            "avg_bandwidth_mbps": 2370370.37,
+            "peak_bandwidth_mbps": 7111111.11,
+            "replication_factor": 3,
+            "peak_to_avg_ratio": 3,
+            "_notes": "qps_peak = qps_avg * peak_to_avg_ratio (rule of thumb for diurnal traffic). Replicated storage assumes synchronous N-way replication. Bandwidth excludes protocol overhead and TLS expansion (~10-20% real-world tax)."
+          }
+        }
+      ],
+      "token_usage": {
+        "prompt_tokens": 5509,
+        "completion_tokens": 1643,
+        "total_tokens": 7152,
+        "estimated_cost_usd": 0.004832
+      }
+    },
+    {
+      "id": "core-05-uber",
+      "query": "Design Uber's ride-matching service. Explain how drivers and riders are matched in real time and how location updates are handled.",
+      "expectations": {
+        "topic": "uber",
+        "expects_tool_call": false,
+        "expects_guard_trigger": false
+      },
+      "score": {
+        "completeness": 9,
+        "scalability_reasoning": 8,
+        "tradeoff_coverage": 9,
+        "factuality": 9,
+        "tool_used": true,
+        "appropriate_tool_use": false,
+        "guard_triggered_correctly": null,
+        "one_line_critique": "Strong overall design but missing explicit Payment Service integration and some fault tolerance and security details.",
+        "overall": 8.75
+      },
+      "api_latency_s": 33.78,
+      "api_error": null,
+      "revision_count": 0,
+      "tool_calls": [
+        {
+          "name": "estimate_capacity",
+          "args": {
+            "daily_active_users": 1000000,
+            "avg_payload_kb": 0.5,
+            "ops_per_user_per_day": 20,
+            "peak_to_avg_ratio": 3,
+            "replication_factor": 3
+          },
+          "result": {
+            "qps_avg": 231.5,
+            "qps_peak": 694.4,
+            "yearly_storage_gb_raw": 3480.9,
+            "yearly_storage_gb_replicated": 10442.7,
+            "avg_bandwidth_mbps": 0.95,
+            "peak_bandwidth_mbps": 2.84,
+            "replication_factor": 3,
+            "peak_to_avg_ratio": 3,
+            "_notes": "qps_peak = qps_avg * peak_to_avg_ratio (rule of thumb for diurnal traffic). Replicated storage assumes synchronous N-way replication. Bandwidth excludes protocol overhead and TLS expansion (~10-20% real-world tax)."
+          }
+        }
+      ],
+      "token_usage": {
+        "prompt_tokens": 5637,
+        "completion_tokens": 1695,
+        "total_tokens": 7332,
+        "estimated_cost_usd": 0.004967
+      }
+    }
+  ]
+}

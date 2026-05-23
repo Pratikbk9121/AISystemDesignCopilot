@@ -1,5 +1,5 @@
 """
-Script to initialize the vector database with system design documentation
+Script to initialize Qdrant vector database with system design documentation
 """
 import sys
 from pathlib import Path
@@ -7,26 +7,28 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.core.rag import DocumentProcessor, EmbeddingGenerator, VectorStore
+from app.core.rag import DocumentProcessor, EmbeddingGenerator, QdrantVectorStore
 from app.core.config import settings
 
 
-def initialize_vector_store(data_directory: str = "./data/system_design_docs"):
+def initialize_qdrant(data_directory: str = "./data/system_design_docs"):
     """
-    Initialize the vector store with documents from a directory
+    Initialize Qdrant vector store with documents from a directory
     
     Args:
         data_directory: Path to directory containing system design documentation
     """
     print("=" * 60)
-    print("Initializing Vector Database")
+    print("Initializing Qdrant Vector Database")
     print("=" * 60)
     
     # Initialize components
     print("\n1. Initializing components...")
     doc_processor = DocumentProcessor()
     embedding_generator = EmbeddingGenerator()
-    vector_store = VectorStore(embedding_generator=embedding_generator)
+    
+    # Initialize Qdrant (in-memory or persistent based on config)
+    vector_store = QdrantVectorStore(embedding_generator=embedding_generator)
     
     # Check if data directory exists
     data_path = Path(data_directory)
@@ -45,13 +47,15 @@ def initialize_vector_store(data_directory: str = "./data/system_design_docs"):
         print("\n⚠️  No documents found. Please add .txt, .md, or .json files to the data directory.")
         return
     
-    # Add documents to vector store
-    print("\n3. Generating embeddings and building vector index...")
+    # Add documents to Qdrant
+    print("\n3. Generating embeddings and indexing in Qdrant...")
     vector_store.add_documents(documents)
     
-    # Save the index
-    print(f"\n4. Saving vector store to {settings.faiss_index_path}...")
-    vector_store.save()
+    # Get collection info
+    print("\n4. Vector store information:")
+    info = vector_store.get_collection_info()
+    for key, value in info.items():
+        print(f"   {key}: {value}")
     
     # Test retrieval
     print("\n5. Testing retrieval with sample query...")
@@ -61,14 +65,17 @@ def initialize_vector_store(data_directory: str = "./data/system_design_docs"):
     print(f"\n   Query: '{test_query}'")
     print(f"   Found {len(results)} results:")
     for i, (doc, score) in enumerate(results, 1):
-        print(f"\n   Result {i} (score: {score:.4f}):")
+        print(f"\n   Result {i} (similarity: {score:.4f}):")
         print(f"   {doc.content[:200]}...")
         if doc.metadata:
             print(f"   Metadata: {doc.metadata}")
     
     print("\n" + "=" * 60)
-    print("✅ Vector database initialized successfully!")
+    print("✅ Qdrant vector database initialized successfully!")
     print("=" * 60)
+    print(f"\nStorage mode: {'In-memory' if settings.qdrant_use_memory else 'Persistent'}")
+    if not settings.qdrant_use_memory:
+        print(f"Storage path: {settings.qdrant_path}")
 
 
 def create_sample_documents(data_path: Path):
@@ -98,6 +105,11 @@ Uber is a ride-sharing platform that connects riders with drivers in real-time.
 - **Redis**: In-memory cache for session data and real-time locations
 - **Cassandra**: Time-series data for ride history and analytics
 
+## Geospatial Indexing
+- **QuadTree or S2**: Efficiently find nearby drivers
+- **Sharding by geographic region**: Reduces query latency
+- **Location updates**: Drivers send location every 4 seconds
+
 ## Scaling Strategy
 - Horizontal scaling with load balancing
 - Database sharding by geographic region
@@ -107,6 +119,7 @@ Uber is a ride-sharing platform that connects riders with drivers in real-time.
 ## Trade-offs
 **SQL vs NoSQL**: Hybrid approach - SQL for ACID compliance, NoSQL for scalability
 **Consistency vs Availability**: Eventual consistency for ride history, strong consistency for payments
+**Push vs Pull**: WebSockets for real-time updates vs HTTP polling
 """,
         "netflix_system_design.md": """
 # Netflix System Design
@@ -125,17 +138,24 @@ Netflix is a video streaming platform serving millions of concurrent users globa
 - **Cassandra**: Primary database for distributed, highly available storage
 - **MySQL**: User authentication and subscription data
 - **ElasticSearch**: Content search and discovery
+- **S3**: Video storage before CDN distribution
+
+## Video Delivery
+- **Adaptive Bitrate Streaming**: Adjusts quality based on bandwidth
+- **Multiple CDN providers**: Amazon CloudFront, Akamai, etc.
+- **Open Connect**: Netflix's custom CDN appliances in ISP data centers
 
 ## Scaling Strategy
 - Microservices architecture with thousands of services
 - Multi-region deployment for global reach
-- Chaos engineering for resilience testing
+- Chaos engineering for resilience testing (Chaos Monkey)
 - Auto-scaling based on traffic patterns
 
 ## Key Insights
 - 90% of traffic served from cache/CDN
 - Adaptive bitrate streaming for optimal quality
 - Predictive content placement based on viewing patterns
+- A/B testing for UI and recommendation improvements
         """,
     }
     
@@ -149,13 +169,25 @@ Netflix is a video streaming platform serving millions of concurrent users globa
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Initialize vector database with system design docs")
+    parser = argparse.ArgumentParser(description="Initialize Qdrant vector database with system design docs")
     parser.add_argument(
         "--data-dir",
         type=str,
         default="./data/system_design_docs",
         help="Directory containing system design documentation"
     )
+    parser.add_argument(
+        "--clear",
+        action="store_true",
+        help="Clear existing collection before initializing"
+    )
     
     args = parser.parse_args()
-    initialize_vector_store(args.data_dir)
+    
+    if args.clear:
+        print("Clearing existing Qdrant collection...")
+        from app.core.rag import QdrantVectorStore
+        store = QdrantVectorStore()
+        store.clear_collection()
+    
+    initialize_qdrant(args.data_dir)

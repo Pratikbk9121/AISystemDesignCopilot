@@ -16,7 +16,8 @@ Implementation (what callers don't see):
 
 All session and state management complexity is hidden behind this seam.
 """
-from typing import Any, Dict
+import logging
+from typing import Any, AsyncIterator, Dict
 from uuid import uuid4
 
 from app.models.schemas import (
@@ -34,6 +35,8 @@ from app.core.graph import SystemDesignGraph
 from app.core.config import settings
 from app.core.dependencies import get_llm_cache, get_conversation_cache
 from app.core.state_manager import create_state_manager
+
+logger = logging.getLogger(__name__)
 
 
 class SystemDesignOrchestrator:
@@ -204,47 +207,78 @@ class SystemDesignOrchestrator:
 
         return response
 
-    async def generate_design_streaming(
+    async def stream_design(
         self,
-        query: str,
-        session_id: str,
-        conversation_history: ConversationHistory,
-        include_evaluation: bool = True,
-        context: Dict[str, Any] | None = None,
-    ):
+        query: SystemDesignQuery,
+    ) -> AsyncIterator[Dict[str, Any]]:
         """
-        Generate system design with STREAMING for better user experience.
+        Streaming counterpart to generate_design().
 
-        This async generator yields events as the design is being generated:
-        - RAG retrieval progress
-        - Design generation chunks (streamed from LLM)
-        - Evaluation results (optional, in background)
+        Symmetric with the sync seam: callers pass a SystemDesignQuery and
+        get back the event stream. Session lifecycle, conversation
+        hydration, and persistence all live here — the route only frames
+        events as SSE.
 
-        Args:
-            query: User's system design question
-            session_id: Session identifier
-            conversation_history: Previous conversation context
-            include_evaluation: Whether to evaluate the design
-            context: Additional context from the user
+        Yields the event vocabulary the frontend already understands:
+            metadata, progress, tool_call, design_complete,
+            revision_started, evaluation, done, error.
 
-        Yields:
-            Dict events with 'type' and 'data' keys
+        Persistence runs in a finally block so a client disconnect still
+        saves the user message and any architecture captured before the
+        stream was cut.
         """
-        # Get previous messages for context
-        messages = conversation_history.get_messages_for_prompt()
+        session_id = query.session_id or str(uuid4())
+        history = self.state_manager.get_conversation(session_id)
+        history.add_message("user", query.query)
 
-        # Extract previous architecture if exists
-        previous_architecture = None
-        if messages and len(messages) > 0:
-            previous_architecture = conversation_history.metadata.get("last_architecture")
+        captured_architecture: Dict[str, Any] | None = None
+        captured_explanation: str = ""
+        captured_revision_count: int = 0
+        saw_error: bool = False
 
-        # Stream through the graph pipeline
-        async for event in self.graph.run_streaming(
-            query=query,
-            session_id=session_id,
-            messages=messages,
-            additional_context=context,
-            include_evaluation=include_evaluation,
-            previous_architecture=previous_architecture,
-        ):
-            yield event
+        yield {
+            "type": "metadata",
+            "data": {"session_id": session_id, "query": query.query},
+        }
+
+        try:
+            async for event in self.graph.run_streaming(
+                query=query.query,
+                session_id=session_id,
+                messages=history.get_messages_for_prompt(),
+                additional_context=query.context,
+                include_evaluation=query.include_evaluation,
+                previous_architecture=history.metadata.get("last_architecture"),
+            ):
+                etype = event.get("type")
+                edata = event.get("data") or {}
+                if etype == "design_complete":
+                    # revise_design fires another design_complete after the
+                    # initial one — latest wins.
+                    if edata.get("architecture"):
+                        captured_architecture = edata["architecture"]
+                    if edata.get("explanation"):
+                        captured_explanation = edata["explanation"]
+                    if "revision_count" in edata:
+                        captured_revision_count = edata["revision_count"]
+                elif etype == "error":
+                    saw_error = True
+                yield event
+        finally:
+            try:
+                if captured_architecture is not None:
+                    history.metadata["last_architecture"] = captured_architecture
+                if captured_explanation:
+                    history.add_message("assistant", captured_explanation)
+                self.state_manager.save_conversation(session_id, history)
+            except Exception:
+                logger.exception("Failed to persist conversation after streaming")
+
+        yield {
+            "type": "done",
+            "data": {
+                "session_id": session_id,
+                "had_error": saw_error,
+                "revision_count": captured_revision_count,
+            },
+        }

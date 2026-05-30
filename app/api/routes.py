@@ -6,7 +6,6 @@ Thin HTTP adapters that delegate to deep business logic modules.
 import json
 import json as _json
 import logging
-from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -122,50 +121,13 @@ async def generate_system_design_stream(query: SystemDesignQuery):
         )
 
     async def event_generator():
-        """Generate Server-Sent Events for streaming response"""
+        """Frame orchestrator events as Server-Sent Events."""
         try:
-            # Generate or use existing session ID
-            session_id = query.session_id or str(uuid4())
-
-            # Send initial metadata
-            yield f"event: metadata\ndata: {json.dumps({'session_id': session_id, 'query': query.query})}\n\n"
-
-            logger.info(f"[STREAM] Processing query for session: {session_id}")
-
-            # Get cache manager and state
-            conversation_cache = get_conversation_cache()
-            state_mgr = create_state_manager(conversation_cache)
-            conversation_history = state_mgr.get_conversation(session_id)
-            conversation_history.add_message("user", query.query)
-
-            # Send progress update
-            yield f"event: progress\ndata: {json.dumps({'step': 'rag_retrieval', 'message': 'Retrieving relevant context...'})}\n\n"
-
-            # Initialize orchestrator
-            orch = SystemDesignOrchestrator()
-
-            # Stream the design generation
-            async for event in orch.generate_design_streaming(
-                query=query.query,
-                session_id=session_id,
-                conversation_history=conversation_history,
-                include_evaluation=query.include_evaluation,
-                context=query.context,
-            ):
-                # Forward events from orchestrator
+            orchestrator = SystemDesignOrchestrator()
+            async for event in orchestrator.stream_design(query):
                 event_type = event.get("type", "progress")
                 event_data = json.dumps(event.get("data", {}))
                 yield f"event: {event_type}\ndata: {event_data}\n\n"
-
-            # Save conversation history
-            # Note: We'll need to extract the explanation from the stream
-            state_mgr.save_conversation(session_id, conversation_history)
-
-            logger.info(f"[STREAM] Successfully completed for session: {session_id}")
-
-            # Send completion event
-            yield f"event: done\ndata: {json.dumps({'session_id': session_id})}\n\n"
-
         except Exception:
             logger.exception("[STREAM] Failed to generate system design")
             error_data = json.dumps({"detail": "Internal server error"})

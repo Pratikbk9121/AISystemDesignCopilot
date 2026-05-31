@@ -128,34 +128,68 @@ async def generate_system_design_stream(request: Request, query: SystemDesignQue
         )
 
     async def event_generator():
-        """Frame orchestrator events as Server-Sent Events with 15s keep-alives."""
+        """Frame orchestrator events as Server-Sent Events with 15s keep-alives.
+
+        We run the orchestrator in a background task that pushes events into
+        a queue, then race queue.get() against a 15s timeout. The keep-alive
+        path must NOT call wait_for() on the orchestrator's __anext__ — that
+        cancels the in-flight LLM call every tick, so Gemini never finishes.
+        """
+        _SENTINEL = object()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def pump():
+            try:
+                orchestrator = SystemDesignOrchestrator()
+                async for event in orchestrator.stream_design(query):
+                    await queue.put(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Surface upstream errors as an `error` event instead of
+                # silently closing the stream — the frontend treats `error`
+                # as the terminal signal.
+                logger.exception("[STREAM] Orchestrator raised")
+                await queue.put({
+                    "type": "error",
+                    "data": {"detail": "Internal server error", "message": str(exc)},
+                })
+            finally:
+                await queue.put(_SENTINEL)
+
+        pump_task = asyncio.create_task(pump())
+
         try:
-            orchestrator = SystemDesignOrchestrator()
-            stream = orchestrator.stream_design(query).__aiter__()
             while True:
                 try:
-                    event = await asyncio.wait_for(stream.__anext__(), timeout=15.0)
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
                 except asyncio.TimeoutError:
-                    # SSE comment line — keeps Cloudflare/HF nginx from closing
-                    # the connection during cold-start LLM calls. Frontend
-                    # parsers ignore comment lines, so this is invisible to UI.
+                    # SSE comment line — invisible to clients but keeps
+                    # Cloudflare/HF nginx from closing the idle connection
+                    # during long LLM calls. Crucially this does NOT cancel
+                    # the pump task or the LLM call it's awaiting.
                     yield ": keep-alive\n\n"
                     continue
-                except StopAsyncIteration:
+
+                if event is _SENTINEL:
                     break
 
                 event_type = event.get("type", "progress")
                 event_data = json.dumps(event.get("data", {}))
                 yield f"event: {event_type}\ndata: {event_data}\n\n"
         except asyncio.CancelledError:
-            # Client disconnect / shutdown — propagate so the orchestrator's
+            # Client disconnect / shutdown — cancel pump so the orchestrator's
             # finally block runs and uvicorn's graceful-shutdown timer can
             # tear the request down cleanly on Python 3.11+.
+            pump_task.cancel()
             raise
         except Exception:
             logger.exception("[STREAM] Failed to generate system design")
             error_data = json.dumps({"detail": "Internal server error"})
             yield f"event: error\ndata: {error_data}\n\n"
+        finally:
+            if not pump_task.done():
+                pump_task.cancel()
 
     return StreamingResponse(
         event_generator(),

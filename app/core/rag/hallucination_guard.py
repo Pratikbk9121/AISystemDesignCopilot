@@ -99,7 +99,7 @@ class HallucinationGuard:
             "confidence_details": confidence_details
         }
     
-    def create_insufficient_context_response(
+    async def create_insufficient_context_response(
         self,
         query: str,
         validation_result: Dict[str, Any]
@@ -124,7 +124,7 @@ class HallucinationGuard:
                 topics_info = self.knowledge_analyzer.get_available_topics()
                 available_topics = [t["name"] for t in topics_info.get("topics", [])[:5]]
                 example_queries = topics_info.get("example_queries", [])[:3]
-                similar_topics = self.knowledge_analyzer.suggest_similar_topics(query, top_k=3)
+                similar_topics = await self.knowledge_analyzer.suggest_similar_topics(query, top_k=3)
             except Exception as e:
                 # Fallback if analyzer fails
                 pass
@@ -183,7 +183,7 @@ class HallucinationGuard:
             "example_queries": example_queries,
         }
     
-    def should_proceed_with_generation(
+    async def should_proceed_with_generation(
         self,
         query: str,
         retrieved_docs: List[Tuple[Document, float]],
@@ -208,7 +208,7 @@ class HallucinationGuard:
         validation_result = self.check_context_sufficiency(query, retrieved_docs)
         
         if not validation_result["is_sufficient"]:
-            insufficient_response = self.create_insufficient_context_response(
+            insufficient_response = await self.create_insufficient_context_response(
                 query,
                 validation_result
             )

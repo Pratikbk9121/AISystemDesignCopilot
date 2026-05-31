@@ -3,7 +3,7 @@ Unit tests for app.core.rag.hallucination_guard.HallucinationGuard.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -66,28 +66,31 @@ def test_happy_path_passes_all_checks():
     assert result["confidence_details"] is not None
 
 
-def test_force_generation_bypasses_checks():
+@pytest.mark.asyncio
+async def test_force_generation_bypasses_checks():
     """force_generation=True returns (True, None) regardless of context."""
     guard = HallucinationGuard()
-    proceed, insufficient = guard.should_proceed_with_generation(
+    proceed, insufficient = await guard.should_proceed_with_generation(
         query="anything", retrieved_docs=[], force_generation=True
     )
     assert proceed is True
     assert insufficient is None
 
 
-def test_insufficient_response_includes_available_topics_when_analyzer_attached():
+@pytest.mark.asyncio
+async def test_insufficient_response_includes_available_topics_when_analyzer_attached():
     """When a vector_store is passed, the analyzer surfaces topics."""
     fake_vs = MagicMock()
     guard = HallucinationGuard(min_documents=1, vector_store=fake_vs)
 
     # Replace the lazy-built analyzer with a stub that returns deterministic data.
+    # suggest_similar_topics is async on the real analyzer, so the stub must too.
     fake_analyzer = MagicMock()
     fake_analyzer.get_available_topics.return_value = {
         "topics": [{"name": "URL Shortener"}, {"name": "Cache"}],
         "example_queries": ["Design a URL Shortener", "Design a cache"],
     }
-    fake_analyzer.suggest_similar_topics.return_value = ["URL Shortener"]
+    fake_analyzer.suggest_similar_topics = AsyncMock(return_value=["URL Shortener"])
     guard.knowledge_analyzer = fake_analyzer
 
     validation = {
@@ -96,7 +99,7 @@ def test_insufficient_response_includes_available_topics_when_analyzer_attached(
         "suggestion": "Add more sources",
         "confidence_details": None,
     }
-    response = guard.create_insufficient_context_response(
+    response = await guard.create_insufficient_context_response(
         query="design an unknown system",
         validation_result=validation,
     )

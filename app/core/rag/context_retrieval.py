@@ -157,7 +157,7 @@ class ContextRetrieval:
         
         # Step 4: Hallucination Guard
         if self.enable_guard:
-            should_proceed, insufficient_msg = self.hallucination_guard.should_proceed_with_generation(
+            should_proceed, insufficient_msg = await self.hallucination_guard.should_proceed_with_generation(
                 query=query,
                 retrieved_docs=reranked_results
             )

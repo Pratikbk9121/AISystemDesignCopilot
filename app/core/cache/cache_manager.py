@@ -4,7 +4,6 @@ Cache manager with compression and hash-based key generation
 import hashlib
 import hmac
 import json
-import os
 import zlib
 import pickle
 from datetime import datetime
@@ -12,29 +11,45 @@ from typing import Any, Optional
 import logging
 
 from app.core.cache.redis_client import RedisClient
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Bump CACHE_VERSION on any schema-breaking change to invalidate stale entries.
 CACHE_VERSION = "1"
 
-# Salt is read from env (CACHE_KEY_SALT). Falling back to a stable default keeps
-# dev deterministic; we log once at startup so production deploys notice the gap.
-_DEFAULT_SALT = "asdc-default-salt"
-_CACHE_KEY_SALT = os.getenv("CACHE_KEY_SALT", _DEFAULT_SALT)
-_SALT_WARNED = False
+
+def _record_hit(namespace: str) -> None:
+    """Bump the Prometheus hit counter; swallow any error.
+
+    Imported locally to avoid pulling the middleware package at module-load
+    time (cache_manager is imported transitively from app.core.config users).
+    """
+    try:
+        from app.middleware.metrics import CACHE_HITS
+
+        CACHE_HITS.labels(namespace=namespace).inc()
+    except Exception:  # noqa: BLE001 — metrics must not break the cache path
+        pass
+
+
+def _record_miss(namespace: str) -> None:
+    """Bump the Prometheus miss counter; swallow any error."""
+    try:
+        from app.middleware.metrics import CACHE_MISSES
+
+        CACHE_MISSES.labels(namespace=namespace).inc()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _get_salt_bytes() -> bytes:
-    """Return the configured cache key salt as bytes; warn once if defaulted."""
-    global _SALT_WARNED
-    if _CACHE_KEY_SALT == _DEFAULT_SALT and not _SALT_WARNED:
-        logger.warning(
-            "CACHE_KEY_SALT env var not set; using non-secret default salt. "
-            "Set CACHE_KEY_SALT in production to harden cache keys."
-        )
-        _SALT_WARNED = True
-    return _CACHE_KEY_SALT.encode("utf-8")
+    """Return the configured cache key salt as bytes.
+
+    Source of truth is `settings.cache_key_salt` — the prod model-validator
+    rejects the dev placeholder, so reaching this in prod implies a real value.
+    """
+    return settings.cache_key_salt.encode("utf-8")
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -99,7 +114,7 @@ class CacheManager:
         """Decompress data using zlib"""
         return zlib.decompress(data)
 
-    def get_json(self, *key_parts: Any, namespace: Optional[str] = None) -> Optional[dict]:
+    async def get_json(self, *key_parts: Any, namespace: Optional[str] = None) -> Optional[dict]:
         """
         Get JSON object from cache
 
@@ -110,10 +125,12 @@ class CacheManager:
         Returns:
             Cached JSON object or None
         """
+        ns = self._resolve_namespace(namespace)
         key = self._generate_key(namespace, *key_parts)
-        data = self.redis.get(key)
+        data = await self.redis.get(key)
 
         if data is None:
+            _record_miss(ns)
             return None
 
         # Step 1: decompress. zlib failure on bytes that aren't a valid stream
@@ -124,11 +141,13 @@ class CacheManager:
             logger.warning(
                 f"Corrupt cached payload (zlib) at key {key}: {e}; deleting entry."
             )
-            self.redis.delete(key)
+            await self.redis.delete(key)
+            _record_miss(ns)
             return None
         except Exception as e:
             # Unexpected; treat as transient miss, do NOT delete.
             logger.warning(f"Decompression error for key {key}: {e}; treating as miss.")
+            _record_miss(ns)
             return None
 
         # Step 2: utf-8 decode. Invalid UTF-8 -> confirmed corruption.
@@ -138,20 +157,24 @@ class CacheManager:
             logger.warning(
                 f"Corrupt cached payload (non-utf8) at key {key}: {e}; deleting entry."
             )
-            self.redis.delete(key)
+            await self.redis.delete(key)
+            _record_miss(ns)
             return None
 
         # Step 3: JSON parse. Could be transient (partial read) — log + miss.
         try:
-            return json.loads(text)
+            result = json.loads(text)
         except json.JSONDecodeError as e:
             logger.warning(
                 f"JSON decode failed for cached entry at key {key}: {e}; "
                 "returning miss without deleting."
             )
+            _record_miss(ns)
             return None
+        _record_hit(ns)
+        return result
 
-    def set_json(
+    async def set_json(
         self,
         value: dict,
         *key_parts: Any,
@@ -176,12 +199,12 @@ class CacheManager:
             # Use custom encoder to handle datetime objects
             serialized = json.dumps(value, cls=DateTimeEncoder).encode()
             compressed = self._compress(serialized)
-            return self.redis.set(key, compressed, ttl)
+            return await self.redis.set(key, compressed, ttl)
         except Exception as e:
             logger.warning(f"Failed to cache JSON: {e}")
             return False
 
-    def get_pickle(self, *key_parts: Any, namespace: Optional[str] = None) -> Optional[Any]:
+    async def get_pickle(self, *key_parts: Any, namespace: Optional[str] = None) -> Optional[Any]:
         """
         Get pickled object from cache
 
@@ -192,10 +215,12 @@ class CacheManager:
         Returns:
             Cached object or None
         """
+        ns = self._resolve_namespace(namespace)
         key = self._generate_key(namespace, *key_parts)
-        data = self.redis.get(key)
+        data = await self.redis.get(key)
 
         if data is None:
+            _record_miss(ns)
             return None
 
         # zlib failure -> confirmed corruption.
@@ -205,26 +230,32 @@ class CacheManager:
             logger.warning(
                 f"Corrupt cached payload (zlib) at key {key}: {e}; deleting entry."
             )
-            self.redis.delete(key)
+            await self.redis.delete(key)
+            _record_miss(ns)
             return None
         except Exception as e:
             logger.warning(f"Decompression error for key {key}: {e}; treating as miss.")
+            _record_miss(ns)
             return None
 
         # Pickle errors may be transient (partial network read); do NOT delete.
         try:
-            return pickle.loads(decompressed)
+            result = pickle.loads(decompressed)
         except (pickle.UnpicklingError, EOFError, AttributeError, ImportError, IndexError) as e:
             logger.warning(
                 f"Pickle decode failed for cached entry at key {key}: {e}; "
                 "returning miss without deleting."
             )
+            _record_miss(ns)
             return None
         except Exception as e:
             logger.warning(f"Unexpected pickle error for key {key}: {e}; treating as miss.")
+            _record_miss(ns)
             return None
+        _record_hit(ns)
+        return result
 
-    def set_pickle(
+    async def set_pickle(
         self,
         value: Any,
         *key_parts: Any,
@@ -248,17 +279,17 @@ class CacheManager:
         try:
             serialized = pickle.dumps(value)
             compressed = self._compress(serialized)
-            return self.redis.set(key, compressed, ttl)
+            return await self.redis.set(key, compressed, ttl)
         except Exception as e:
             logger.warning(f"Failed to cache pickle: {e}")
             return False
 
-    def delete(self, *key_parts: Any, namespace: Optional[str] = None) -> bool:
+    async def delete(self, *key_parts: Any, namespace: Optional[str] = None) -> bool:
         """Delete cached item"""
         key = self._generate_key(namespace, *key_parts)
-        return self.redis.delete(key)
+        return await self.redis.delete(key)
 
-    def clear_namespace(self, namespace: Optional[str] = None) -> int:
+    async def clear_namespace(self, namespace: Optional[str] = None) -> int:
         """Clear all keys in the given (or instance default) namespace+version."""
         ns = self._resolve_namespace(namespace)
-        return self.redis.clear_pattern(f"{ns}:v{CACHE_VERSION}:*")
+        return await self.redis.clear_pattern(f"{ns}:v{CACHE_VERSION}:*")

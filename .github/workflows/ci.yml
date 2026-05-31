@@ -4,20 +4,122 @@ on:
   push:
     branches: [master, main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  test:
+  secret-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python 3.11
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    env:
+      # Provide the minimum env so app.core.config.Settings can instantiate.
+      # Tests themselves don't make outbound calls.
+      TEKION_LLM_KEY: test-llm-key
+      CACHE_KEY_SALT: ci-cache-key-salt-1234567890abc
+      API_AUTH_ENABLED: "true"
+      DEBUG: "true"
+      TEST_API_KEY: test-key-abc
+      REDIS_ENABLED: "false"
+      AUTO_SEED_KNOWLEDGE: "false"
+      QDRANT_REQUIRED_ON_STARTUP: "false"
+      BIFROST_HEALTHCHECK_ON_STARTUP: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
-      - name: Run tests
-        run: python -m pytest tests/ -v
+      - name: Run unit tests
+        run: python -m pytest tests/ -m "not integration" -v
+
+  integration-tests:
+    # Manually triggered only — runs against a real Redis + Qdrant + Bifrost.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333
+    env:
+      TEKION_LLM_KEY: ${{ secrets.TEKION_LLM_KEY }}
+      CACHE_KEY_SALT: ci-cache-key-salt-1234567890abc
+      API_AUTH_ENABLED: "true"
+      DEBUG: "true"
+      TEST_API_KEY: test-key-abc
+      REDIS_HOST: localhost
+      REDIS_PORT: "6379"
+      REDIS_ENABLED: "true"
+      QDRANT_URL: http://localhost:6333
+      QDRANT_USE_MEMORY: "false"
+      API_BASE_URL: http://localhost:8000
+      AUTO_SEED_KNOWLEDGE: "true"
+      QDRANT_REQUIRED_ON_STARTUP: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Start API in background
+        run: |
+          nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 \
+            > uvicorn.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health > /dev/null; then
+              echo "API is up"; break
+            fi
+            sleep 2
+          done
+      - name: Run integration tests
+        run: python -m pytest tests/ -m integration -v
+      - name: Dump server logs on failure
+        if: failure()
+        run: cat uvicorn.log
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dev deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Ruff (lint)
+        run: ruff check app/ tests/ scripts/ evals/
+      - name: Ruff (format check)
+        run: ruff format --check app/ tests/ scripts/ evals/
+      - name: Mypy
+        run: mypy app/

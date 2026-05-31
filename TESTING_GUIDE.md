@@ -145,9 +145,9 @@ Visit `http://localhost:8000/docs` for Swagger UI where you can:
 
 ## Testing the RAG Pipeline
 
-### Initialize Vector Database
+### Initialize Qdrant Vector Database
 ```bash
-python scripts/initialize_vector_db.py
+python scripts/initialize_qdrant.py
 ```
 
 ### Add Custom Documents
@@ -206,9 +206,9 @@ python scripts/initialize_vector_db.py
 - Restart the server
 
 ### Issue: "No documents found in vector store"
-- Run `python scripts/initialize_vector_db.py`
+- Run `python scripts/initialize_qdrant.py`
 - Check `data/system_design_docs/` has documents
-- Verify FAISS index created in `data/vector_store/`
+- Verify Qdrant collection created (check logs on startup)
 
 ### Issue: 500 Internal Server Error
 - Check server logs

@@ -97,7 +97,7 @@ async def test_stream_design_success_path_persists_architecture():
     assert yielded[-1]["data"]["session_id"] == session_id
     assert yielded[-1]["data"]["had_error"] is False
 
-    history = orch.state_manager.get_conversation(session_id)
+    history = await orch.state_manager.get_conversation(session_id)
     assert history.metadata["last_architecture"] == ARCH_V1
     assert [m.role for m in history.messages] == ["user", "assistant"]
     assert history.messages[-1].content == "Use a hash table and a base62 encoder."
@@ -140,7 +140,7 @@ async def test_stream_design_refinement_uses_previous_architecture():
     assert orch.graph.calls[-1]["previous_architecture"] == ARCH_V1
 
     # The latest design_complete (revision) wins.
-    history = orch.state_manager.get_conversation(session_id)
+    history = await orch.state_manager.get_conversation(session_id)
     assert history.metadata["last_architecture"] == ARCH_V2
     # done event reports the revision count.
     assert second_yielded[-1]["data"]["revision_count"] == 1
@@ -172,7 +172,7 @@ async def test_stream_design_client_disconnect_still_saves():
 
     # Session id is from the metadata event.
     session_id = seen[0]["data"]["session_id"]
-    history = orch.state_manager.get_conversation(session_id)
+    history = await orch.state_manager.get_conversation(session_id)
     assert history.metadata["last_architecture"] == ARCH_V1
     assert any(m.role == "assistant" and m.content == "partial" for m in history.messages)
 
@@ -196,7 +196,7 @@ async def test_stream_design_hallucination_guard_emits_error_and_skips_arch_save
     assert types[-1] == "done"
     assert yielded[-1]["data"]["had_error"] is True
 
-    history = orch.state_manager.get_conversation(session_id)
+    history = await orch.state_manager.get_conversation(session_id)
     # No architecture captured -> metadata untouched.
     assert "last_architecture" not in history.metadata
     # No assistant message appended; the user message is still saved.

@@ -2,7 +2,7 @@
 
 ## System Overview
 
-The AI System Design Copilot is built using **LangChain** and **LangGraph** for intelligent orchestration of the system design generation workflow.
+The AI System Design Copilot is built using **LangChain** components with a **custom workflow pipeline** for intelligent orchestration of the system design generation workflow.
 
 ## High-Level Architecture
 
@@ -25,12 +25,13 @@ The AI System Design Copilot is built using **LangChain** and **LangGraph** for 
 │         System Design Orchestrator                   │
 │  - Coordinates the entire workflow                   │
 │  - Manages conversation history                      │
-│  - Invokes LangGraph workflow                        │
+│  - Invokes workflow pipeline                         │
 └──────────────────┬───────────────────────────────────┘
                    │
                    ▼
 ┌──────────────────────────────────────────────────────┐
-│          LangGraph State Machine                     │
+│          Custom Workflow Pipeline                    │
+│          (SystemDesignGraph)                         │
 │                                                       │
 │  ┌─────────────────────────────────────────┐        │
 │  │  1. retrieve_context                     │        │
@@ -104,7 +105,7 @@ The AI System Design Copilot is built using **LangChain** and **LangGraph** for 
 - Handles JSON extraction from markdown
 - Provides format instructions for prompts
 
-### 2. **LangGraph State Machine**
+### 2. **Custom Workflow Pipeline**
 
 #### SystemDesignGraph (`app/core/graph/graph.py`)
 
@@ -124,15 +125,16 @@ The AI System Design Copilot is built using **LangChain** and **LangGraph** for 
 }
 ```
 
-**Workflow Nodes**:
-1. **retrieve_context**: RAG retrieval from vector DB
+**Workflow Steps**:
+1. **retrieve_context**: RAG retrieval from vector DB using multi-query, reranking, and confidence scoring
 2. **detect_intent**: Determine if new design or refinement
 3. **generate_design**: LLM generation with structured output
 4. **evaluate_design**: Optional quality assessment
 5. **finalize**: Package response
 
-**Conditional Edges**:
-- Evaluation is only triggered if `include_evaluation=True`
+**Conditional Logic**:
+- Evaluation is only executed if `include_evaluation=True`
+- Hallucination guard may short-circuit the workflow if insufficient context detected
 
 ### 3. **RAG Pipeline**
 
@@ -155,17 +157,19 @@ The AI System Design Copilot is built using **LangChain** and **LangGraph** for 
 
 ## Key Design Decisions
 
-### Why LangGraph?
-✅ **State Management**: Built-in state tracking across nodes
-✅ **Conditional Flows**: Easy evaluation bypass
-✅ **Debugging**: Clear visualization of workflow steps
-✅ **Scalability**: Can add more nodes (caching, validation, etc.)
+### Why Custom Workflow Pipeline?
+✅ **Simplicity**: Lightweight async functions without framework overhead
+✅ **Full Control**: Direct control over state management and flow
+✅ **Flexibility**: Easy to add custom logic and conditional execution
+✅ **Transparency**: Clear execution path without abstraction layers
+✅ **Advanced RAG**: Integrated multi-query, reranking, confidence scoring, and hallucination guard
 
 ### Why LangChain?
 ✅ **Provider Abstraction**: Easy to switch between OpenAI/Anthropic
+✅ **Embeddings Integration**: Seamless support for HuggingFace and OpenAI embeddings
+✅ **Vector Store Utilities**: Built-in support for FAISS and Qdrant
 ✅ **Prompt Templates**: Reusable, testable prompt engineering
-✅ **Structured Outputs**: Native support for JSON schema enforcement
-✅ **Built-in Retries**: Resilience to API failures
+✅ **Mature Ecosystem**: Well-tested components with active community
 
 ### Structured Output Strategy
 - Use LLM's native structured output when available (OpenAI with function calling)
@@ -176,35 +180,46 @@ The AI System Design Copilot is built using **LangChain** and **LangGraph** for 
 
 1. **User Request**: "Design Uber"
 2. **API Layer**: Validates request, creates/loads session
-3. **Orchestrator**: Invokes LangGraph workflow
-4. **LangGraph**:
-   - Retrieves 5 relevant docs about ride-sharing systems
+3. **Orchestrator**: Invokes custom workflow pipeline
+4. **Workflow Pipeline**:
+   - Multi-query retrieval: Generates 3 sub-queries for better context coverage
+   - Re-ranks retrieved documents by relevance
+   - Calculates confidence score (checks if sufficient context exists)
+   - Hallucination guard: Verifies context adequacy before generation
    - Detects this is a new design (not refinement)
    - Constructs prompt with RAG context + conversation history
-   - Calls OpenAI GPT-4 with structured output schema
+   - Calls LLM (via Tekion Bifrost) with structured output instructions
    - Parses JSON response into `SystemArchitecture`
    - Optionally evaluates design with second LLM call
-   - Packages final response
+   - Packages final response with confidence metrics
 5. **API Layer**: Returns structured JSON to client
-6. **State Manager**: Saves conversation + architecture for future refinement
+6. **State Manager**: Saves conversation + architecture for future refinement (Redis or in-memory)
 
 ## Extension Points
 
-### Adding New Nodes
+### Adding New Pipeline Steps
 ```python
-workflow.add_node("validate_design", self._validate_design)
-workflow.add_edge("generate_design", "validate_design")
+# In SystemDesignGraph class
+async def _validate_design(self, state: SystemDesignState) -> Dict[str, Any]:
+    # Custom validation logic
+    return {"validation_passed": True, "current_step": "validate_design"}
+
+# In run() method, add step:
+state = await self._validate_design(state)
 ```
 
 ### Adding Caching
-- Redis integration in LangGraph nodes
-- Cache key: hash(query + context)
+- Redis caching already integrated for embeddings, LLM responses, and conversations
+- LLM responses cached by prompt hash
+- Embeddings cached by text hash
+- Cache key: hash(content + provider + model)
 
 ### Adding Multi-Agent Collaboration
-- Separate LangGraph workflows for different expertise
-- Architecture review agent
-- Cost optimization agent
-- Security review agent
+- Create separate SystemDesignGraph instances for different expertise
+- Architecture review pipeline
+- Cost optimization pipeline
+- Security review pipeline
+- Aggregate results from multiple pipelines
 
 ## Performance Considerations
 

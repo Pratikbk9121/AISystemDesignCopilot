@@ -1,5 +1,11 @@
 """
-Conversation state management for tracking chat history and session states
+Conversation state management for tracking chat history and session states.
+
+Async interface
+---------------
+Both the in-memory and Redis-backed managers expose async methods so call
+sites don't need to branch on which backend is active. The in-memory variant
+is trivially async (no I/O — just dict operations under a threading.Lock).
 """
 from typing import Dict, Optional
 from threading import Lock
@@ -30,7 +36,7 @@ class ConversationStateManager:
         self._conversations: Dict[str, ConversationHistory] = {}
         self._lock = Lock()
 
-    def get_conversation(self, session_id: str) -> ConversationHistory:
+    async def get_conversation(self, session_id: str) -> ConversationHistory:
         """
         Retrieve conversation history for a session.
         Creates a new conversation if it doesn't exist.
@@ -46,7 +52,7 @@ class ConversationStateManager:
                 self._conversations[session_id] = ConversationHistory(session_id=session_id)
             return self._conversations[session_id]
 
-    def get_session_strict(self, session_id: str) -> ConversationHistory:
+    async def get_session_strict(self, session_id: str) -> ConversationHistory:
         """
         Retrieve conversation history for an existing session without creating one.
 
@@ -64,7 +70,7 @@ class ConversationStateManager:
                 raise SessionNotFoundError(session_id)
             return self._conversations[session_id]
 
-    def save_conversation(self, session_id: str, conversation: ConversationHistory) -> None:
+    async def save_conversation(self, session_id: str, conversation: ConversationHistory) -> None:
         """
         Save or update conversation history.
 
@@ -75,7 +81,7 @@ class ConversationStateManager:
         with self._lock:
             self._conversations[session_id] = conversation
 
-    def delete_conversation(self, session_id: str) -> None:
+    async def delete_conversation(self, session_id: str) -> None:
         """
         Delete conversation history for a session.
 
@@ -86,7 +92,7 @@ class ConversationStateManager:
             if session_id in self._conversations:
                 del self._conversations[session_id]
 
-    def list_sessions(self) -> list[str]:
+    async def list_sessions(self) -> list[str]:
         """
         List all active session IDs.
 
@@ -96,7 +102,7 @@ class ConversationStateManager:
         with self._lock:
             return list(self._conversations.keys())
 
-    def clear_all(self) -> None:
+    async def clear_all(self) -> None:
         """
         Clear all conversation histories.
         Use with caution - typically for testing only.
@@ -109,6 +115,9 @@ class RedisConversationStateManager(ConversationStateManager):
     """
     Redis-backed conversation state manager for production use.
     Provides persistence and distributed session management.
+
+    Construction is sync — we just stash the cache_manager. The is_available
+    probe runs lazily on first read/write so __init__ stays non-blocking.
     """
 
     def __init__(self, cache_manager: Optional[object] = None):
@@ -121,27 +130,36 @@ class RedisConversationStateManager(ConversationStateManager):
         super().__init__()
         self.cache_manager = cache_manager
 
-        if cache_manager and cache_manager.redis.is_available():
-            logger.info("Redis conversation state manager initialized")
-        else:
-            logger.warning("Redis not available, falling back to in-memory storage")
-            self.cache_manager = None
+        if cache_manager is not None:
+            logger.info("Redis conversation state manager configured")
 
-    def get_conversation(self, session_id: str) -> ConversationHistory:
+    async def _ensure_redis(self) -> bool:
+        """Probe Redis once; on failure, null out cache_manager and warn.
+
+        Returns True if Redis is usable, False if we've degraded to in-memory.
+        Mutates self.cache_manager on first failure so subsequent calls take
+        the cheap branch.
+        """
+        if self.cache_manager is None:
+            return False
+        try:
+            if await self.cache_manager.redis.is_available():
+                return True
+        except Exception as e:  # noqa: BLE001 — degraded mode shouldn't crash
+            logger.warning("Redis is_available() raised: %s; degrading to in-memory.", e)
+        logger.warning("Redis not available, falling back to in-memory storage")
+        self.cache_manager = None
+        return False
+
+    async def get_conversation(self, session_id: str) -> ConversationHistory:
         """
         Retrieve conversation history from Redis.
         Creates a new conversation if it doesn't exist.
-
-        Args:
-            session_id: The session identifier
-
-        Returns:
-            ConversationHistory for the session
         """
-        if not self.cache_manager:
-            return super().get_conversation(session_id)
+        if not await self._ensure_redis():
+            return await super().get_conversation(session_id)
 
-        cached = self.cache_manager.get_json(session_id)
+        cached = await self.cache_manager.get_json(session_id)
         if not cached:
             return ConversationHistory(session_id=session_id)
 
@@ -158,17 +176,17 @@ class RedisConversationStateManager(ConversationStateManager):
             )
             return ConversationHistory(session_id=session_id)
 
-    def get_session_strict(self, session_id: str) -> ConversationHistory:
+    async def get_session_strict(self, session_id: str) -> ConversationHistory:
         """
         Retrieve a session from Redis without creating one.
 
         Raises:
             SessionNotFoundError: If the session does not exist in Redis.
         """
-        if not self.cache_manager:
-            return super().get_session_strict(session_id)
+        if not await self._ensure_redis():
+            return await super().get_session_strict(session_id)
 
-        cached = self.cache_manager.get_json(session_id)
+        cached = await self.cache_manager.get_json(session_id)
         if not cached:
             raise SessionNotFoundError(session_id)
 
@@ -182,33 +200,29 @@ class RedisConversationStateManager(ConversationStateManager):
             )
             raise SessionNotFoundError(session_id) from e
 
-    def save_conversation(self, session_id: str, conversation: ConversationHistory) -> None:
-        """
-        Save conversation history to Redis with TTL.
-
-        Args:
-            session_id: The session identifier
-            conversation: The conversation history to save
-        """
-        if not self.cache_manager:
-            return super().save_conversation(session_id, conversation)
+    async def save_conversation(
+        self, session_id: str, conversation: ConversationHistory
+    ) -> None:
+        """Save conversation history to Redis with TTL."""
+        if not await self._ensure_redis():
+            return await super().save_conversation(session_id, conversation)
 
         conversation_data = (
             conversation.model_dump()
             if hasattr(conversation, "model_dump")
             else conversation.dict()
         )
-        self.cache_manager.set_json(
+        await self.cache_manager.set_json(
             conversation_data, session_id, ttl=settings.cache_conversation_ttl
         )
 
-    def delete_conversation(self, session_id: str) -> None:
+    async def delete_conversation(self, session_id: str) -> None:
         """Delete conversation history from Redis."""
-        if not self.cache_manager:
-            return super().delete_conversation(session_id)
-        self.cache_manager.delete(session_id)
+        if not await self._ensure_redis():
+            return await super().delete_conversation(session_id)
+        await self.cache_manager.delete(session_id)
 
-    def list_sessions(self) -> list[str]:
+    async def list_sessions(self) -> list[str]:
         """
         List all active session keys from Redis using non-destructive SCAN.
 
@@ -217,12 +231,12 @@ class RedisConversationStateManager(ConversationStateManager):
         themselves. We return the per-key suffix (the part after the
         namespace prefix) which uniquely identifies each stored session.
         """
-        if not self.cache_manager:
-            return super().list_sessions()
+        if not await self._ensure_redis():
+            return await super().list_sessions()
 
         namespace = self.cache_manager.namespace or ""
         pattern = f"{namespace}*"
-        matched_keys = self.cache_manager.redis.scan_pattern(pattern)
+        matched_keys = await self.cache_manager.redis.scan_pattern(pattern)
 
         session_ids: list[str] = []
         for key in matched_keys:
@@ -234,12 +248,12 @@ class RedisConversationStateManager(ConversationStateManager):
         logger.info("Found %d conversation sessions", len(session_ids))
         return session_ids
 
-    def clear_all(self) -> None:
+    async def clear_all(self) -> None:
         """Clear all conversation histories from Redis."""
-        if not self.cache_manager:
-            return super().clear_all()
+        if not await self._ensure_redis():
+            return await super().clear_all()
 
-        num_cleared = self.cache_manager.clear_namespace()
+        num_cleared = await self.cache_manager.clear_namespace()
         logger.info("Cleared %d conversations from cache", num_cleared)
 
 

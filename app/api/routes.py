@@ -3,17 +3,20 @@ API Routes for System Design endpoints
 
 Thin HTTP adapters that delegate to deep business logic modules.
 """
+import asyncio
 import json
 import json as _json
 import logging
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
+from app.core.config import settings
 from app.core.orchestrator import SystemDesignOrchestrator
 from app.core.dependencies import get_conversation_cache, get_vector_store
 from app.core.state_manager import create_state_manager
 from app.core.knowledge_analyzer import KnowledgeAnalyzer
+from app.middleware import limiter
 from app.models.schemas import (
     SystemDesignQuery,
     SystemDesignResponse,
@@ -33,7 +36,10 @@ router = APIRouter(prefix="/system-design", tags=["System Design"])
     summary="Generate system design architecture",
     description="Generate a comprehensive system design based on the user's query with RAG-enhanced context"
 )
-async def generate_system_design(query: SystemDesignQuery) -> SystemDesignResponse:
+@limiter.limit(settings.rate_limit_query)
+async def generate_system_design(
+    request: Request, query: SystemDesignQuery
+) -> SystemDesignResponse:
     """
     Generate a system design architecture based on the user's query.
 
@@ -86,7 +92,8 @@ async def generate_system_design(query: SystemDesignQuery) -> SystemDesignRespon
     summary="Generate system design with streaming (FAST perceived latency)",
     description="Stream the system design generation process for better user experience. Returns Server-Sent Events (SSE)."
 )
-async def generate_system_design_stream(query: SystemDesignQuery):
+@limiter.limit(settings.rate_limit_query)
+async def generate_system_design_stream(request: Request, query: SystemDesignQuery):
     """
     Generate system design with STREAMING for faster perceived latency.
 
@@ -128,6 +135,11 @@ async def generate_system_design_stream(query: SystemDesignQuery):
                 event_type = event.get("type", "progress")
                 event_data = json.dumps(event.get("data", {}))
                 yield f"event: {event_type}\ndata: {event_data}\n\n"
+        except asyncio.CancelledError:
+            # Client disconnect / shutdown — propagate so the orchestrator's
+            # finally block runs and uvicorn's graceful-shutdown timer can
+            # tear the request down cleanly on Python 3.11+.
+            raise
         except Exception:
             logger.exception("[STREAM] Failed to generate system design")
             error_data = json.dumps({"detail": "Internal server error"})
@@ -151,7 +163,10 @@ async def generate_system_design_stream(query: SystemDesignQuery):
     summary="Retrieve conversation history",
     description="Get the complete conversation history for a session"
 )
-async def get_conversation_history(session_id: str) -> ConversationHistory:
+@limiter.limit("60/minute")
+async def get_conversation_history(
+    request: Request, session_id: str
+) -> ConversationHistory:
     """
     Retrieve the conversation history for a given session.
 
@@ -167,7 +182,7 @@ async def get_conversation_history(session_id: str) -> ConversationHistory:
     try:
         conversation_cache = get_conversation_cache()
         state_mgr = create_state_manager(conversation_cache)
-        conversation = state_mgr.get_conversation(session_id)
+        conversation = await state_mgr.get_conversation(session_id)
         return conversation
     except KeyError:
         raise HTTPException(
@@ -182,7 +197,8 @@ async def get_conversation_history(session_id: str) -> ConversationHistory:
     summary="Clear conversation history",
     description="Delete the conversation history for a session"
 )
-async def clear_conversation(session_id: str) -> None:
+@limiter.limit("60/minute")
+async def clear_conversation(request: Request, session_id: str) -> None:
     """
     Clear the conversation history for a given session.
 
@@ -194,7 +210,7 @@ async def clear_conversation(session_id: str) -> None:
     """
     conversation_cache = get_conversation_cache()
     state_mgr = create_state_manager(conversation_cache)
-    state_mgr.delete_conversation(session_id)
+    await state_mgr.delete_conversation(session_id)
 
 
 
@@ -206,7 +222,8 @@ async def clear_conversation(session_id: str) -> None:
     summary="Get available knowledge base topics",
     description="Returns information about system design topics available in the knowledge base"
 )
-async def get_knowledge_topics() -> dict:
+@limiter.limit("60/minute")
+async def get_knowledge_topics(request: Request) -> dict:
     """
     Get list of available system design topics in the knowledge base.
 
@@ -243,7 +260,8 @@ async def get_knowledge_topics() -> dict:
     summary="Get knowledge base statistics",
     description="Returns detailed statistics about the knowledge base"
 )
-async def get_knowledge_stats() -> dict:
+@limiter.limit("60/minute")
+async def get_knowledge_stats(request: Request) -> dict:
     """
     Get detailed statistics about the knowledge base.
 
@@ -267,21 +285,5 @@ async def get_knowledge_stats() -> dict:
         )
 
 
-@router.get(
-    "/health",
-    status_code=status.HTTP_200_OK,
-    summary="Health check",
-    description="Check if the API is healthy and all dependencies are available"
-)
-async def health_check() -> dict[str, str]:
-    """
-    Health check endpoint to verify the API is running.
-
-    Returns:
-        dict with status information
-    """
-    return {
-        "status": "healthy",
-        "service": "AI System Design Copilot",
-        "version": "0.1.0"
-    }
+# Note: /health moved to app/main.py as an unauthenticated, top-level route so
+# k8s liveness probes don't need to know the API key.

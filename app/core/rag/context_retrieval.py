@@ -129,11 +129,11 @@ class ContextRetrieval:
             )
         else:
             logger.debug("Using Direct Retrieval")
-            results = self.vector_store.search(query, top_k=settings.top_k_retrieval)
+            results = await self.vector_store.search(query, top_k=settings.top_k_retrieval)
         
         # Step 2: Reranking (if enabled)
         if self.enable_reranking:
-            reranked_results = self.reranker.rerank(
+            reranked_results = await self.reranker.rerank(
                 query=query,
                 documents=results,
                 top_k=5,

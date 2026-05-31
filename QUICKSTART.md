@@ -5,8 +5,8 @@ Get the AI System Design Copilot running in 5 minutes!
 ## Prerequisites
 
 - Python 3.12+
-- OpenAI API key (required for embeddings and LLM)
-- Anthropic API key (optional, for Claude models)
+- Tekion LLM Key (required for Bifrost gateway access)
+  - Get from #ai-platform-support Slack channel
 
 ## Setup Steps
 
@@ -21,7 +21,7 @@ python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install -e .
+pip install -r requirements.txt
 ```
 
 ### 2. Configure Environment
@@ -34,32 +34,34 @@ cp .env.example .env
 nano .env  # or vim, code, etc.
 ```
 
-Add your API keys:
+Add your Tekion LLM key:
 ```env
-OPENAI_API_KEY=sk-your-key-here
-LLM_PROVIDER=openai
+TEKION_LLM_KEY=sk-bf-your-key-here
+BIFROST_BASE_URL=https://bifrost.stageapp.tekioncloud.xyz/openai
+MODEL=gpt-4.1-mini
 ```
 
 ### 3. Initialize Vector Database
 
 ```bash
-# This creates sample system design documents and builds FAISS index
-python scripts/initialize_vector_db.py
+# This creates sample system design documents and builds Qdrant index
+python scripts/initialize_qdrant.py
 ```
 
 Expected output:
 ```
 ============================================================
-Initializing Vector Database
+Initializing Qdrant Vector Database
 ============================================================
 
 1. Initializing components...
 2. Loading documents from ./data/system_design_docs...
    Loaded 6 document chunks
-3. Generating embeddings and building vector index...
-   Added 6 documents to vector store. Total: 6
-4. Saving vector store to ./data/vector_store/faiss_index...
-   Vector store saved to data/vector_store/faiss_index
+3. Generating embeddings and indexing in Qdrant...
+   Added 6 documents to Qdrant collection 'system_design_docs'
+4. Vector store information:
+   collection_name: system_design_docs
+   points_count: 6
 5. Testing retrieval with sample query...
 
 ✅ Vector database initialized successfully!
@@ -183,9 +185,9 @@ The API returns a structured JSON response:
 - Restart the server after changing `.env`
 
 ### "No documents found in vector store"
-- Run `python scripts/initialize_vector_db.py`
+- Run `python scripts/initialize_qdrant.py`
 - Check that `data/system_design_docs/` contains .md files
-- Verify FAISS index created in `data/vector_store/faiss_index/`
+- Verify Qdrant collection created (check logs on startup)
 
 ### Import errors
 - Make sure you installed with `pip install -e .`
@@ -195,9 +197,10 @@ The API returns a structured JSON response:
 ## Next Steps
 
 - 📖 Read [ARCHITECTURE.md](./ARCHITECTURE.md) for technical deep dive
-- 🧪 Explore the LangGraph workflow visualization at `/docs`
+- 🧪 Explore the API documentation at `/docs`
 - 🔧 Add your own system design documents to `data/system_design_docs/`
-- 🚀 Extend the LangGraph workflow with custom nodes
+- 🚀 Extend the workflow pipeline with custom steps
+- 📊 Monitor confidence metrics and hallucination guard effectiveness
 
 ## Example Queries to Try
 

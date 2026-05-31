@@ -32,6 +32,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import json
 import logging
 
+from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
 
 from app.core.graph.state import SystemDesignState
@@ -227,6 +228,9 @@ class SystemDesignGraph:
         system_message, user_prompt = self._build_design_prompt(state)
 
         if settings.tools_enabled and TOOL_SPECS:
+            # Tool-use path still buffers — the multi-turn loop has to
+            # interleave tool_calls/tool messages before the final answer,
+            # so per-token streaming isn't meaningful here.
             json_instruction = (
                 "\n\nWhen you are done with any tool calls, respond with the final "
                 "JSON architecture only — no markdown, no prose."
@@ -240,8 +244,24 @@ class SystemDesignGraph:
             )
             response = parse_json(response_text)
         else:
-            response = await self.llm_client.generate_structured(
-                prompt=user_prompt, system_message=system_message
+            # Stream LLM tokens out as ``design_chunk`` custom events so
+            # /query-stream can forward them as SSE before the node returns
+            # (the frontend's IncrementalArchitectureParser consumes partial
+            # JSON). When the graph is run via ``ainvoke`` (no streaming
+            # consumer), ``get_stream_writer`` still returns a writer but
+            # nothing reads the custom channel — effectively a no-op.
+            writer = get_stream_writer()
+
+            def _emit_chunk(chunk: str) -> None:
+                try:
+                    writer({"type": "design_chunk", "data": {"chunk": chunk}})
+                except Exception:  # noqa: BLE001 — writer errors must not abort generation
+                    logger.exception("design_chunk writer failed")
+
+            response = await self.llm_client.generate_structured_stream(
+                prompt=user_prompt,
+                system_message=system_message,
+                on_chunk=_emit_chunk,
             )
             tool_calls = []
 
@@ -465,8 +485,19 @@ class SystemDesignGraph:
         )
 
         try:
-            async for event in self.compiled.astream(initial, stream_mode="updates"):
-                # ``event`` is a dict {node_name: returned_state_partial}.
+            async for stream_mode, payload in self.compiled.astream(
+                initial, stream_mode=["updates", "custom"]
+            ):
+                # ``custom`` carries per-token events emitted by nodes via
+                # ``get_stream_writer``. Forward them as-is — they already
+                # match the SSE event vocabulary (``design_chunk`` today).
+                if stream_mode == "custom":
+                    if isinstance(payload, dict) and payload.get("type"):
+                        yield payload
+                    continue
+
+                # ``updates``: dict of {node_name: returned_state_partial}.
+                event = payload
                 for node_name, update in event.items():
                     if not isinstance(update, dict):
                         continue

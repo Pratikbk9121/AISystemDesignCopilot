@@ -182,14 +182,11 @@ OUTPUT FORMAT (JSON array):
         top_k_per_query: int = 3
     ) -> List[Tuple[Document, float]]:
         """
-        Retrieve documents using multi-query approach with concurrent searches
-        dispatched via a threadpool.
+        Retrieve documents using multi-query approach with concurrent searches.
 
-        ``vector_store.search`` is a synchronous (blocking) call, so we offload
-        each sub-query search to a thread via ``asyncio.to_thread`` and gather
-        the results. This gives real I/O concurrency for network-bound Qdrant
-        calls (the GIL is released during socket I/O), but it is NOT true async
-        parallelism — there is no native async vector store interface here.
+        ``vector_store.search`` is now natively async (it awaits the embedding
+        cache + generator), so we can gather() the coroutines directly without
+        threadpool offload.
 
         Args:
             query: Original user query
@@ -213,27 +210,17 @@ OUTPUT FORMAT (JSON array):
         for i, q in enumerate(queries):
             logger.debug("  %d. %s", i+1, q)
 
-        # Concurrent vector searches via threadpool (vector_store.search is sync)
+        # Native-async concurrent vector searches.
         search_start = time.time()
-
-        async def search_async(sub_query: str) -> List[Tuple[Document, float]]:
-            """
-            Run the synchronous ``vector_store.search`` in the default
-            threadpool so multiple searches can overlap on I/O. This is
-            threadpool-based concurrency, not native async parallelism.
-            """
-            # vector_store.search is synchronous; offload to a threadpool so
-            # gather() can overlap multiple blocking calls on network I/O.
-            return await asyncio.to_thread(vector_store.search, sub_query, top_k_per_query)
-
-        # Dispatch all searches concurrently via threadpool
-        logger.debug("Dispatching %d concurrent vector searches via threadpool...", len(queries))
-        all_search_results = await asyncio.gather(*[search_async(q) for q in queries])
+        logger.debug("Dispatching %d concurrent vector searches...", len(queries))
+        all_search_results = await asyncio.gather(
+            *[vector_store.search(q, top_k_per_query) for q in queries]
+        )
 
         search_time = time.time() - search_start
         estimated_sequential_time = len(queries) * 0.5  # Rough estimate: 0.5s per search
         logger.info(
-            "Concurrent search via threadpool completed in %.2fs "
+            "Concurrent search completed in %.2fs "
             "(estimated sequential: ~%.2fs, speedup: %.1fx)",
             search_time, estimated_sequential_time,
             estimated_sequential_time / max(search_time, 0.01)

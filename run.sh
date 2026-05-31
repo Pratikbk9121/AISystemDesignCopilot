@@ -37,4 +37,4 @@ echo ""
 echo "✅ Starting FastAPI server on http://localhost:8000"
 echo "📖 API Documentation: http://localhost:8000/docs"
 echo ""
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8000 --timeout-graceful-shutdown 25

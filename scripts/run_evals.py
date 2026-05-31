@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime
@@ -50,11 +51,13 @@ async def call_api(
     query: str,
     include_evaluation: bool,
     timeout: float,
+    api_key: str | None = None,
 ) -> Dict[str, Any]:
     """POST a single query and return the parsed response."""
     url = f"{base_url.rstrip('/')}/api/v1/system-design/query"
     payload = {"query": query, "include_evaluation": include_evaluation}
-    r = await client.post(url, json=payload, timeout=timeout)
+    headers = {"x-api-key": api_key} if api_key else None
+    r = await client.post(url, json=payload, timeout=timeout, headers=headers)
     r.raise_for_status()
     return r.json()
 
@@ -193,6 +196,7 @@ async def run_one(
     entry: Dict[str, Any],
     base_url: str,
     timeout: float,
+    api_key: str | None = None,
 ) -> Dict[str, Any]:
     """Process a single golden-set entry: API call + judge."""
     qid = entry["id"]
@@ -206,7 +210,12 @@ async def run_one(
     t0 = time.monotonic()
     try:
         api_response = await call_api(
-            client, base_url, query, include_evaluation=True, timeout=timeout
+            client,
+            base_url,
+            query,
+            include_evaluation=True,
+            timeout=timeout,
+            api_key=api_key,
         )
         api_error = None
     except Exception as e:  # noqa: BLE001
@@ -285,7 +294,14 @@ async def main_async(args: argparse.Namespace) -> int:
 
         async def bounded(entry: Dict[str, Any]):
             async with sem:
-                return await run_one(client, judge_llm, entry, args.url, args.timeout)
+                return await run_one(
+                    client,
+                    judge_llm,
+                    entry,
+                    args.url,
+                    args.timeout,
+                    api_key=args.api_key,
+                )
 
         tasks = [asyncio.create_task(bounded(e)) for e in entries]
         for fut in asyncio.as_completed(tasks):
@@ -343,6 +359,11 @@ def main():
     parser.add_argument("--timeout", type=float, default=180.0, help="Per-request timeout (seconds).")
     parser.add_argument("--judge-model", default=None, help="Model name override for the judge LLM.")
     parser.add_argument("--label", default="", help="Optional label appended to the results filename.")
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("TEST_API_KEY"),
+        help="API key sent as `x-api-key`. Defaults to $TEST_API_KEY env var.",
+    )
     args = parser.parse_args()
 
     rc = asyncio.run(main_async(args))

@@ -105,26 +105,42 @@ class QdrantVectorStore:
             logger.error("Error initializing collection: %s", e, exc_info=True)
             raise
 
-    def add_documents(self, documents: List[Document]) -> None:
+    async def add_documents(
+        self,
+        documents: List[Document],
+        ids: Optional[List[str]] = None,
+    ) -> None:
         """
-        Add documents to the Qdrant collection
+        Add documents to the Qdrant collection.
+
+        Async because ``embedding_generator.generate_embeddings`` is async
+        (touches the Redis-backed embedding cache).
 
         Args:
             documents: List of Document objects to add
+            ids: Optional list of point IDs (one per document). When provided,
+                upserts use these IDs — pass deterministic IDs (e.g. uuid5 over
+                source+chunk_index) to make the seed idempotent. When None, a
+                fresh uuid4 is generated per document (legacy behavior).
         """
         if not documents:
             return
 
+        if ids is not None and len(ids) != len(documents):
+            raise ValueError(
+                f"ids length ({len(ids)}) must match documents length ({len(documents)})"
+            )
+
         # Batch-embed all document contents in a single call to avoid N+1
         # round-trips to the embedding provider.
         texts = [doc.content for doc in documents]
-        embeddings = self.embedding_generator.generate_embeddings(texts)
+        embeddings = await self.embedding_generator.generate_embeddings(texts)
 
         # Prepare points for batch upload
         points = []
-        for doc, embedding in zip(documents, embeddings):
-            # Generate unique ID for each document
-            point_id = str(uuid.uuid4())
+        for i, (doc, embedding) in enumerate(zip(documents, embeddings)):
+            # Use caller-provided ID when present; otherwise generate uuid4.
+            point_id = ids[i] if ids is not None else str(uuid.uuid4())
 
             # Prepare payload with document content and metadata
             payload = {
@@ -151,14 +167,17 @@ class QdrantVectorStore:
 
         logger.info("Added %d documents to Qdrant collection '%s'", len(documents), self.collection_name)
 
-    def search(
+    async def search(
         self,
         query: str,
         top_k: int | None = None,
         filter_metadata: Dict[str, Any] | None = None,
     ) -> List[Tuple[Document, float]]:
         """
-        Search for similar documents using Qdrant
+        Search for similar documents using Qdrant.
+
+        Async because ``embedding_generator.generate_embedding`` is async
+        (touches the Redis-backed embedding cache).
 
         Args:
             query: Search query text
@@ -171,7 +190,7 @@ class QdrantVectorStore:
         top_k = top_k or settings.top_k_retrieval
 
         # Generate embedding for query
-        query_embedding = self.embedding_generator.generate_embedding(query)
+        query_embedding = await self.embedding_generator.generate_embedding(query)
 
         # Build filter if metadata is provided
         query_filter = None
@@ -187,13 +206,32 @@ class QdrantVectorStore:
             if conditions:
                 query_filter = Filter(must=conditions)
 
-        # Search in Qdrant using query_points
-        query_response = self.client.query_points(
-            collection_name=self.collection_name,
-            query=query_embedding.tolist(),
-            limit=top_k,
-            query_filter=query_filter,
-        )
+        # Search in Qdrant using query_points. Resolve the Prometheus timer
+        # lazily so a missing metrics module never breaks search; the import
+        # is wrapped, but the actual query_points call is NOT — we want real
+        # Qdrant errors to surface to the caller unchanged.
+        try:
+            from app.middleware.metrics import QDRANT_QUERY
+
+            _timer = QDRANT_QUERY.time()
+        except Exception:  # noqa: BLE001
+            _timer = None
+
+        if _timer is not None:
+            with _timer:
+                query_response = self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_embedding.tolist(),
+                    limit=top_k,
+                    query_filter=query_filter,
+                )
+        else:
+            query_response = self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_embedding.tolist(),
+                limit=top_k,
+                query_filter=query_filter,
+            )
 
         # Convert results to Document format
         results = []
@@ -247,3 +285,17 @@ class QdrantVectorStore:
         self.document_id_map.clear()
         self._initialize_collection()
         logger.info("Cleared all documents from collection: %s", self.collection_name)
+
+    def close(self) -> None:
+        """
+        Release the underlying Qdrant client.
+
+        Qdrant local-mode (persistent path) acquires a file lock; if we exit
+        without closing, a subsequent restart can hit a "storage already
+        accessed" error. Wrapped in try/except so shutdown never raises.
+        """
+        try:
+            self.client.close()
+            logger.info("Qdrant client closed for collection: %s", self.collection_name)
+        except Exception as e:  # noqa: BLE001 — shutdown path, swallow.
+            logger.warning("Error closing Qdrant client: %s", e, exc_info=True)

@@ -11,11 +11,26 @@ from pathlib import Path
 from app.core.config import settings
 
 
+def _current_request_id() -> str | None:
+    """Look up the request-scoped correlation ID via lazy import.
+
+    The lazy import avoids a circular import at module load — `app.middleware`
+    pulls in submodules that themselves use `get_logger`, which imports this
+    module. By deferring until `format()` is called we sidestep the cycle.
+    """
+    try:
+        from app.middleware.request_id import request_id_var
+
+        return request_id_var.get()
+    except Exception:
+        return None
+
+
 class JSONFormatter(logging.Formatter):
     """
     Custom JSON formatter for structured logging
     """
-    
+
     def format(self, record: logging.LogRecord) -> str:
         """Format log record as JSON"""
         log_data = {
@@ -27,15 +42,21 @@ class JSONFormatter(logging.Formatter):
             "function": record.funcName,
             "line": record.lineno,
         }
-        
+
+        # Correlation ID — present whenever the log call happens inside a
+        # request task (RequestIdMiddleware sets the ContextVar).
+        rid = _current_request_id()
+        if rid is not None:
+            log_data["request_id"] = rid
+
         # Add exception info if present
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
-        
+
         # Add extra fields
         if hasattr(record, "extra_data"):
             log_data.update(record.extra_data)
-        
+
         return json.dumps(log_data)
 
 
@@ -43,7 +64,7 @@ class TextFormatter(logging.Formatter):
     """
     Custom text formatter with colors for console output
     """
-    
+
     COLORS = {
         'DEBUG': '\033[36m',      # Cyan
         'INFO': '\033[32m',       # Green
@@ -52,22 +73,27 @@ class TextFormatter(logging.Formatter):
         'CRITICAL': '\033[35m',   # Magenta
     }
     RESET = '\033[0m'
-    
+
     def format(self, record: logging.LogRecord) -> str:
         """Format log record with colors"""
         color = self.COLORS.get(record.levelname, self.RESET)
-        
-        # Format: [LEVEL] timestamp - logger - message
+
+        # Short-form request id prefix (first 8 chars) so terminal output stays
+        # scannable. Omitted entirely outside of request context.
+        rid = _current_request_id()
+        rid_prefix = f"[rid={rid[:8]}] " if rid else ""
+
+        # Format: [LEVEL] timestamp [rid=...] - logger - message
         formatted = (
             f"{color}[{record.levelname}]{self.RESET} "
-            f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} - "
-            f"{record.name} - {record.getMessage()}"
+            f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} "
+            f"{rid_prefix}- {record.name} - {record.getMessage()}"
         )
-        
+
         # Add exception if present
         if record.exc_info:
             formatted += f"\n{self.formatException(record.exc_info)}"
-        
+
         return formatted
 
 

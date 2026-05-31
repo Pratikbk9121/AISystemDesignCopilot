@@ -115,15 +115,14 @@ class EmbeddingGenerator:
 
         return 768  # Default dimension
 
-    def generate_embedding(self, text: str) -> np.ndarray:
+    async def generate_embedding(self, text: str) -> np.ndarray:
         """
-        Generate embedding for a single text using LangChain
+        Generate embedding for a single text using LangChain.
 
-        Args:
-            text: Text to embed
-
-        Returns:
-            Numpy array of embedding vector
+        Async-by-interface so callers can ``await`` regardless of whether the
+        caching subclass is in play. The underlying LangChain call itself is
+        sync — wrap via asyncio.to_thread when called from an async context
+        if you need to free the event loop.
         """
         try:
             # Use LangChain's embed_query method
@@ -133,15 +132,12 @@ class EmbeddingGenerator:
         except Exception as e:
             raise RuntimeError(f"Failed to generate embedding: {str(e)}") from e
 
-    def generate_embeddings(self, texts: List[str]) -> List[np.ndarray]:
+    async def generate_embeddings(self, texts: List[str]) -> List[np.ndarray]:
         """
-        Generate embeddings for multiple texts using LangChain (batched)
+        Generate embeddings for multiple texts using LangChain (batched).
 
-        Args:
-            texts: List of texts to embed
-
-        Returns:
-            List of numpy arrays containing embedding vectors
+        Async-by-interface so callers can ``await`` regardless of whether the
+        caching subclass is in play.
         """
         if not texts:
             return []
@@ -156,13 +152,13 @@ class EmbeddingGenerator:
         except Exception as e:
             raise RuntimeError(f"Failed to generate embeddings: {str(e)}") from e
 
-    def batch_generate_embeddings(
+    async def batch_generate_embeddings(
         self,
         texts: List[str],
         batch_size: int = 100
     ) -> List[np.ndarray]:
         """
-        Generate embeddings in batches for large datasets
+        Generate embeddings in batches for large datasets.
 
         Args:
             texts: List of texts to embed
@@ -175,7 +171,7 @@ class EmbeddingGenerator:
 
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
-            embeddings = self.generate_embeddings(batch)
+            embeddings = await self.generate_embeddings(batch)
             all_embeddings.extend(embeddings)
 
             # Progress logging
@@ -220,21 +216,25 @@ class CachedEmbeddingGenerator(EmbeddingGenerator):
         if self.cache_enabled:
             logger.info("Embedding caching enabled")
 
-    def generate_embedding(self, text: str) -> np.ndarray:
-        """Generate embedding with caching"""
+    async def generate_embedding(self, text: str) -> np.ndarray:
+        """Generate embedding with caching (async to await Redis I/O)."""
         if not self.cache_enabled:
-            return super().generate_embedding(text)
+            return await super().generate_embedding(text)
 
         # Try to get from cache
-        cached = self.cache_manager.get_pickle(text, self.provider, self.model)
+        cached = await self.cache_manager.get_pickle(text, self.provider, self.model)
         if cached is not None:
             logger.debug(f"Embedding cache HIT for text: {text[:50]}...")
             return cached
 
-        # Generate and cache
+        # Generate and cache. The underlying LangChain call is sync/blocking;
+        # callers run in an async context, so this CPU-or-network blocking is
+        # acceptable here (matches the legacy behavior) — the embedding
+        # provider call dominates and is already orchestrated via threadpool
+        # in multi_query retrieval.
         logger.debug(f"Embedding cache MISS for text: {text[:50]}...")
-        embedding = super().generate_embedding(text)
-        self.cache_manager.set_pickle(
+        embedding = await super().generate_embedding(text)
+        await self.cache_manager.set_pickle(
             embedding,
             text,
             self.provider,
@@ -244,10 +244,10 @@ class CachedEmbeddingGenerator(EmbeddingGenerator):
 
         return embedding
 
-    def generate_embeddings(self, texts: List[str]) -> List[np.ndarray]:
-        """Generate embeddings with caching"""
+    async def generate_embeddings(self, texts: List[str]) -> List[np.ndarray]:
+        """Generate embeddings with caching (async to await Redis I/O)."""
         if not self.cache_enabled:
-            return super().generate_embeddings(texts)
+            return await super().generate_embeddings(texts)
 
         results = []
         cache_misses = []
@@ -255,7 +255,7 @@ class CachedEmbeddingGenerator(EmbeddingGenerator):
 
         # Check cache for each text
         for idx, text in enumerate(texts):
-            cached = self.cache_manager.get_pickle(text, self.provider, self.model)
+            cached = await self.cache_manager.get_pickle(text, self.provider, self.model)
             if cached is not None:
                 results.append(cached)
             else:
@@ -266,11 +266,11 @@ class CachedEmbeddingGenerator(EmbeddingGenerator):
         # Generate embeddings for cache misses
         if cache_misses:
             logger.info(f"Embedding cache: {len(texts) - len(cache_misses)}/{len(texts)} hits, generating {len(cache_misses)} new")
-            new_embeddings = super().generate_embeddings(cache_misses)
+            new_embeddings = await super().generate_embeddings(cache_misses)
 
             # Store in cache and update results
             for idx, text, embedding in zip(cache_miss_indices, cache_misses, new_embeddings):
-                self.cache_manager.set_pickle(
+                await self.cache_manager.set_pickle(
                     embedding,
                     text,
                     self.provider,

@@ -20,7 +20,6 @@ wheels/
 .installed.cfg
 *.egg
 .env
-.env.example
 
 # Virtual Environment
 venv/
@@ -53,11 +52,22 @@ backend.log
 # Testing
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
+
+# Lint / type-check caches
+.mypy_cache/
+.ruff_cache/
+
+# Playwright MCP scratch
+.playwright-mcp/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Local handoff / agent context (not for commit)
+.handoff-*.md
 
 # Project Specific
 vector_store/

@@ -91,7 +91,7 @@ class SystemDesignOrchestrator:
         session_id = query.session_id or str(uuid4())
 
         # Step 2: Load conversation history
-        conversation_history = self.state_manager.get_conversation(session_id)
+        conversation_history = await self.state_manager.get_conversation(session_id)
 
         # Step 3: Add user query to conversation
         conversation_history.add_message("user", query.query)
@@ -137,7 +137,7 @@ class SystemDesignOrchestrator:
             # Save conversation even when guard triggers
             explanation_text = insufficient_response.get("explanation", "Not enough data to answer your question")
             conversation_history.add_message("assistant", explanation_text)
-            self.state_manager.save_conversation(session_id, conversation_history)
+            await self.state_manager.save_conversation(session_id, conversation_history)
 
             return SystemDesignResponse(
                 query=query.query,
@@ -203,7 +203,7 @@ class SystemDesignOrchestrator:
         # Step 7: Save conversation state (architecture + assistant message)
         conversation_history.metadata["last_architecture"] = architecture.dict()
         conversation_history.add_message("assistant", explanation)
-        self.state_manager.save_conversation(session_id, conversation_history)
+        await self.state_manager.save_conversation(session_id, conversation_history)
 
         return response
 
@@ -228,7 +228,7 @@ class SystemDesignOrchestrator:
         stream was cut.
         """
         session_id = query.session_id or str(uuid4())
-        history = self.state_manager.get_conversation(session_id)
+        history = await self.state_manager.get_conversation(session_id)
         history.add_message("user", query.query)
 
         captured_architecture: Dict[str, Any] | None = None
@@ -270,7 +270,7 @@ class SystemDesignOrchestrator:
                     history.metadata["last_architecture"] = captured_architecture
                 if captured_explanation:
                     history.add_message("assistant", captured_explanation)
-                self.state_manager.save_conversation(session_id, history)
+                await self.state_manager.save_conversation(session_id, history)
             except Exception:
                 logger.exception("Failed to persist conversation after streaming")
 

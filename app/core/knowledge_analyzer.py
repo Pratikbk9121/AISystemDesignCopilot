@@ -99,23 +99,26 @@ class KnowledgeAnalyzer:
             "knowledge_base_path": str(self.data_directory),
         }
     
-    def suggest_similar_topics(self, query: str, top_k: int = 3) -> List[str]:
+    async def suggest_similar_topics(self, query: str, top_k: int = 3) -> List[str]:
         """
         Suggest available topics similar to the query.
-        
+
+        Async because ``vector_store.search`` is async (it awaits the embedding
+        generator + cache).
+
         Args:
             query: User's query
             top_k: Number of suggestions to return
-            
+
         Returns:
             List of suggested topic names
         """
         if not self.vector_store:
             return []
-        
+
         try:
             # Search vector store for similar content
-            results = self.vector_store.search(query, top_k=top_k)
+            results = await self.vector_store.search(query, top_k=top_k)
             
             # Extract topic names from metadata
             suggestions = []

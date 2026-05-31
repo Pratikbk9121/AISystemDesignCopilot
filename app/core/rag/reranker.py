@@ -110,7 +110,7 @@ class DocumentReranker:
         
         return score
     
-    def rerank(
+    async def rerank(
         self,
         query: str,
         documents: List[Tuple[Document, float]],
@@ -118,14 +118,16 @@ class DocumentReranker:
         use_diversity: bool = True
     ) -> List[Tuple[Document, float]]:
         """
-        Re-rank documents using enhanced relevance scoring
-        
+        Re-rank documents using enhanced relevance scoring.
+
+        Async because ``embedding_generator.generate_embeddings`` is async.
+
         Args:
             query: Original user query
             documents: List of (Document, initial_score) tuples
             top_k: Number of top documents to return (None = all)
             use_diversity: Whether to apply diversity penalty
-        
+
         Returns:
             Re-ranked list of (Document, new_score) tuples
         """
@@ -139,7 +141,7 @@ class DocumentReranker:
         for doc, initial_score in documents:
             relevance_score = self.calculate_relevance_score(query, doc, initial_score)
             scored_docs.append((doc, relevance_score))
-        
+
         # Apply diversity if requested
         if use_diversity:
             final_docs = []
@@ -151,7 +153,7 @@ class DocumentReranker:
             # Batch-embed all candidate documents up-front in a single call to
             # avoid N+1 embedding round-trips inside the diversity loop.
             doc_texts = [doc.content for doc, _ in scored_docs]
-            doc_embeddings = self.embedding_generator.generate_embeddings(doc_texts)
+            doc_embeddings = await self.embedding_generator.generate_embeddings(doc_texts)
 
             for (doc, score), doc_embedding in zip(scored_docs, doc_embeddings):
                 # Calculate diversity penalty using pre-computed embedding

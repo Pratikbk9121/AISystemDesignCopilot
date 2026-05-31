@@ -1,193 +1,90 @@
 """
-Script to initialize Qdrant vector database with system design documentation
+Initialize Qdrant from local knowledge files.
+
+Thin CLI around :func:`app.core.rag.bootstrap.bootstrap_knowledge`. Use this
+when you want to seed (or reseed) the vector DB from a development machine.
+The same function runs automatically in the FastAPI lifespan when
+``AUTO_SEED_KNOWLEDGE=true``.
+
+Examples
+--------
+    # idempotent seed from ./data/system_design_docs
+    python scripts/initialize_qdrant.py
+
+    # write sample docs if data dir is empty, then seed
+    python scripts/initialize_qdrant.py --create-samples
+
+    # ignore the up-to-date check and re-upsert everything
+    python scripts/initialize_qdrant.py --force
 """
+from __future__ import annotations
+
+import argparse
+import asyncio
 import sys
 from pathlib import Path
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Allow `python scripts/initialize_qdrant.py` from the repo root.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.core.rag import DocumentProcessor, EmbeddingGenerator, QdrantVectorStore
-from app.core.config import settings
-
-
-def initialize_qdrant(data_directory: str = "./data/system_design_docs"):
-    """
-    Initialize Qdrant vector store with documents from a directory
-    
-    Args:
-        data_directory: Path to directory containing system design documentation
-    """
-    print("=" * 60)
-    print("Initializing Qdrant Vector Database")
-    print("=" * 60)
-    
-    # Initialize components
-    print("\n1. Initializing components...")
-    doc_processor = DocumentProcessor()
-    embedding_generator = EmbeddingGenerator()
-    
-    # Initialize Qdrant (in-memory or persistent based on config)
-    vector_store = QdrantVectorStore(embedding_generator=embedding_generator)
-    
-    # Check if data directory exists
-    data_path = Path(data_directory)
-    if not data_path.exists():
-        print(f"\n⚠️  Data directory not found: {data_directory}")
-        print("Creating directory and sample documents...")
-        data_path.mkdir(parents=True, exist_ok=True)
-        create_sample_documents(data_path)
-    
-    # Load and process documents
-    print(f"\n2. Loading documents from {data_directory}...")
-    documents = doc_processor.load_documents_from_directory(data_directory)
-    print(f"   Loaded {len(documents)} document chunks")
-    
-    if len(documents) == 0:
-        print("\n⚠️  No documents found. Please add .txt, .md, or .json files to the data directory.")
-        return
-    
-    # Add documents to Qdrant
-    print("\n3. Generating embeddings and indexing in Qdrant...")
-    vector_store.add_documents(documents)
-    
-    # Get collection info
-    print("\n4. Vector store information:")
-    info = vector_store.get_collection_info()
-    for key, value in info.items():
-        print(f"   {key}: {value}")
-    
-    # Test retrieval
-    print("\n5. Testing retrieval with sample query...")
-    test_query = "How to design a scalable ride-sharing system?"
-    results = vector_store.search(test_query, top_k=3)
-    
-    print(f"\n   Query: '{test_query}'")
-    print(f"   Found {len(results)} results:")
-    for i, (doc, score) in enumerate(results, 1):
-        print(f"\n   Result {i} (similarity: {score:.4f}):")
-        print(f"   {doc.content[:200]}...")
-        if doc.metadata:
-            print(f"   Metadata: {doc.metadata}")
-    
-    print("\n" + "=" * 60)
-    print("✅ Qdrant vector database initialized successfully!")
-    print("=" * 60)
-    print(f"\nStorage mode: {'In-memory' if settings.qdrant_use_memory else 'Persistent'}")
-    if not settings.qdrant_use_memory:
-        print(f"Storage path: {settings.qdrant_path}")
+from app.core.config import settings  # noqa: E402
+from app.core.rag import QdrantVectorStore  # noqa: E402
+from app.core.rag.bootstrap import (  # noqa: E402
+    bootstrap_knowledge,
+    create_sample_documents,
+)
 
 
-def create_sample_documents(data_path: Path):
-    """
-    Create sample system design documents for testing
-    
-    Args:
-        data_path: Path to save sample documents
-    """
-    sample_docs = {
-        "uber_system_design.md": """
-# Uber System Design
-
-## Overview
-Uber is a ride-sharing platform that connects riders with drivers in real-time.
-
-## Core Components
-1. **API Gateway**: Entry point for all client requests
-2. **User Service**: Manages user profiles and authentication
-3. **Ride Service**: Handles ride requests and state management
-4. **Matching Service**: Matches riders with nearby drivers using geospatial indexing
-5. **Payment Service**: Processes payments and manages transactions
-6. **Notification Service**: Sends real-time updates to users
-
-## Database Architecture
-- **PostgreSQL**: Primary database for transactional data (users, rides, payments)
-- **Redis**: In-memory cache for session data and real-time locations
-- **Cassandra**: Time-series data for ride history and analytics
-
-## Geospatial Indexing
-- **QuadTree or S2**: Efficiently find nearby drivers
-- **Sharding by geographic region**: Reduces query latency
-- **Location updates**: Drivers send location every 4 seconds
-
-## Scaling Strategy
-- Horizontal scaling with load balancing
-- Database sharding by geographic region
-- CDN for static assets
-- Message queue (Kafka) for async processing
-
-## Trade-offs
-**SQL vs NoSQL**: Hybrid approach - SQL for ACID compliance, NoSQL for scalability
-**Consistency vs Availability**: Eventual consistency for ride history, strong consistency for payments
-**Push vs Pull**: WebSockets for real-time updates vs HTTP polling
-""",
-        "netflix_system_design.md": """
-# Netflix System Design
-
-## Overview
-Netflix is a video streaming platform serving millions of concurrent users globally.
-
-## Core Components
-1. **Content Delivery Network (CDN)**: Edge servers for low-latency video delivery
-2. **User Service**: Manages profiles, preferences, watch history
-3. **Recommendation Engine**: ML-based personalized content recommendations
-4. **Video Encoding Service**: Transcodes videos into multiple formats and quality levels
-5. **Billing Service**: Manages subscriptions and payments
-
-## Database Architecture
-- **Cassandra**: Primary database for distributed, highly available storage
-- **MySQL**: User authentication and subscription data
-- **ElasticSearch**: Content search and discovery
-- **S3**: Video storage before CDN distribution
-
-## Video Delivery
-- **Adaptive Bitrate Streaming**: Adjusts quality based on bandwidth
-- **Multiple CDN providers**: Amazon CloudFront, Akamai, etc.
-- **Open Connect**: Netflix's custom CDN appliances in ISP data centers
-
-## Scaling Strategy
-- Microservices architecture with thousands of services
-- Multi-region deployment for global reach
-- Chaos engineering for resilience testing (Chaos Monkey)
-- Auto-scaling based on traffic patterns
-
-## Key Insights
-- 90% of traffic served from cache/CDN
-- Adaptive bitrate streaming for optimal quality
-- Predictive content placement based on viewing patterns
-- A/B testing for UI and recommendation improvements
-        """,
-    }
-    
-    for filename, content in sample_docs.items():
-        file_path = data_path / filename
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        print(f"   Created: {file_path}")
+async def _run(data_dir: Path, force: bool) -> dict:
+    vector_store = QdrantVectorStore()
+    try:
+        return await bootstrap_knowledge(
+            vector_store, data_dir=data_dir, force=force
+        )
+    finally:
+        vector_store.close()
 
 
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Initialize Qdrant vector database with system design docs")
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--data-dir",
         type=str,
-        default="./data/system_design_docs",
-        help="Directory containing system design documentation"
+        default=settings.knowledge_data_dir,
+        help="Directory containing knowledge files (.md/.txt/.json).",
     )
     parser.add_argument(
-        "--clear",
+        "--create-samples",
         action="store_true",
-        help="Clear existing collection before initializing"
+        help="Write sample documents into the data dir if it is empty.",
     )
-    
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-ingest even if the collection already has the expected count.",
+    )
     args = parser.parse_args()
-    
-    if args.clear:
-        print("Clearing existing Qdrant collection...")
-        from app.core.rag import QdrantVectorStore
-        store = QdrantVectorStore()
-        store.clear_collection()
-    
-    initialize_qdrant(args.data_dir)
+
+    data_dir = Path(args.data_dir)
+    if args.create_samples:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        if not any(data_dir.iterdir()):
+            create_sample_documents(data_dir)
+
+    # bootstrap_knowledge is async (vector_store.add_documents awaits the
+    # embedding cache); wrap the entry point with asyncio.run for the CLI.
+    result = asyncio.run(_run(data_dir, args.force))
+
+    print(
+        f"status={result['status']} loaded={result['loaded']} "
+        f"skipped={result['skipped']} errors={len(result['errors'])}"
+    )
+    if result["errors"]:
+        for err in result["errors"]:
+            print(f"  - {err}", file=sys.stderr)
+        return 1 if result["status"] == "error" else 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

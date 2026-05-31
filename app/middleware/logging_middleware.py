@@ -37,7 +37,6 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 "extra_data": {
                     "method": request.method,
                     "path": request.url.path,
-                    "query_params": str(request.query_params),
                     "client_host": request.client.host if request.client else None,
                 }
             }

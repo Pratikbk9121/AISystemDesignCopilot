@@ -1,5 +1,5 @@
 """
-LLM Client using the OpenAI SDK against Tekion's Bifrost gateway.
+LLM Client using the OpenAI SDK against any OpenAI-compatible endpoint (Bifrost by default, Gemini/Groq/etc. via LLM_PROVIDER=openai_compatible).
 
 Provides three interfaces:
     - generate(): plain text generation (also used for multi-query retrieval)
@@ -45,16 +45,25 @@ MODEL_PRICING_USD_PER_1K: Dict[str, Tuple[float, float]] = {
     "gpt-4.1": (0.00200, 0.00800),
     "gpt-4o-mini": (0.00015, 0.00060),
     "gpt-4o": (0.00250, 0.01000),
+    "gemini-2.5-flash": (0.00030, 0.00250),
+    "gemini-2.5-flash-lite": (0.00010, 0.00040),
+    "gemini-2.5-pro": (0.00125, 0.01000),
 }
 
 
 class LLMClient:
     """
-    Async LLM client backed by Tekion's Bifrost gateway.
+    Async LLM client that talks to any OpenAI-compatible endpoint.
 
-    Authenticates via the ``x-bf-vk`` header (the SDK still requires an
-    ``api_key`` argument, so we pass the same value there — Bifrost
-    ignores it).
+    Auth header behavior depends on ``settings.llm_provider``:
+        - ``"bifrost"`` (default): injects the ``x-bf-vk`` header expected
+          by Tekion's Bifrost gateway. The SDK still requires an
+          ``api_key`` argument, so we pass the same value — Bifrost
+          ignores it.
+        - ``"openai_compatible"``: no custom auth header is set; the
+          OpenAI SDK adds ``Authorization: Bearer <api_key>`` itself,
+          which is what Gemini's OpenAI-compatible endpoint (and
+          Groq/Cerebras/etc.) expect.
     """
 
     def __init__(self, model: str | None = None):
@@ -62,26 +71,30 @@ class LLMClient:
         Args:
             model: Override the configured default model.
         """
-        if not settings.tekion_llm_key:
+        if not settings.effective_llm_api_key:
             raise ValueError(
-                "Tekion LLM key not configured. Please set TEKION_LLM_KEY in your .env file.\n"
-                "Contact #ai-platform-support slack channel to get your key."
+                f"LLM API key not configured for provider {settings.llm_provider!r}. "
+                "Please set LLM_API_KEY (for openai_compatible providers like Gemini/Groq) "
+                "or TEKION_LLM_KEY (for Bifrost) in your .env file.\n"
+                "For Bifrost, contact #ai-platform-support slack channel to get your key."
             )
 
-        self.model = model or settings.model
+        self.model = model or settings.effective_llm_model
 
-        # Inject Bifrost auth + content headers on every request.
+        # Build per-request headers. Bifrost requires a custom auth header;
+        # plain OpenAI-compatible providers use the SDK's Bearer auth.
+        headers: Dict[str, str] = {"Content-Type": "application/json"}
+        if settings.llm_provider == "bifrost":
+            headers["x-bf-vk"] = settings.effective_llm_api_key
+
         http_client = httpx.AsyncClient(
-            headers={
-                "x-bf-vk": settings.tekion_llm_key,
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             timeout=settings.llm_timeout,
         )
 
         self.client = AsyncOpenAI(
-            base_url=settings.bifrost_base_url,
-            api_key=settings.tekion_llm_key,  # SDK requires it; gateway ignores it
+            base_url=settings.effective_llm_base_url,
+            api_key=settings.effective_llm_api_key,
             http_client=http_client,
             max_retries=settings.max_retries,
         )
@@ -134,6 +147,19 @@ class LLMClient:
         self.usage_totals["completion_tokens"] += completion
         self.usage_totals["total_tokens"] += total
 
+        # Prometheus token counters. Import inside the function so a stale
+        # module load doesn't break the LLM call path — and wrap broadly so
+        # metrics failures never propagate to callers.
+        try:
+            from app.middleware.metrics import LLM_TOKENS
+
+            if prompt:
+                LLM_TOKENS.labels(model=self.model, kind="prompt").inc(prompt)
+            if completion:
+                LLM_TOKENS.labels(model=self.model, kind="completion").inc(completion)
+        except Exception:  # noqa: BLE001 — metrics must never break LLM calls
+            pass
+
         pricing = MODEL_PRICING_USD_PER_1K.get(self.model)
         if pricing is None:
             if self.model not in _PRICING_WARNED:
@@ -146,8 +172,18 @@ class LLMClient:
                 _PRICING_WARNED.add(self.model)
             return
         prompt_rate, completion_rate = pricing
-        self.estimated_cost_usd += (prompt / 1000.0) * prompt_rate
-        self.estimated_cost_usd += (completion / 1000.0) * completion_rate
+        delta_cost = (prompt / 1000.0) * prompt_rate + (
+            completion / 1000.0
+        ) * completion_rate
+        self.estimated_cost_usd += delta_cost
+
+        try:
+            from app.middleware.metrics import LLM_COST
+
+            if delta_cost:
+                LLM_COST.labels(model=self.model).inc(delta_cost)
+        except Exception:  # noqa: BLE001 — metrics must never break LLM calls
+            pass
 
     def get_token_usage(self) -> TokenUsage:
         """Snapshot the per-instance usage as a :class:`TokenUsage` model."""
@@ -235,6 +271,56 @@ class LLMClient:
             logger.error(
                 "JSON parsing failed. Response text (first 500 chars): %s",
                 (response_text or "")[:500],
+            )
+            raise
+
+    async def generate_structured_stream(
+        self,
+        prompt: str,
+        system_message: str | None = None,
+        on_chunk: Optional[Callable[[str], None]] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        Streaming counterpart to :meth:`generate_structured`.
+
+        Streams the completion token-by-token, invoking ``on_chunk(text)``
+        for every delta as it arrives, then parses the accumulated text as
+        JSON and returns the result.
+
+        Used by the streaming graph node so /query-stream can surface
+        ``design_chunk`` SSE events as the LLM produces them (the
+        frontend's IncrementalArchitectureParser consumes the partial
+        JSON). Caching and ``response_format`` are intentionally not used
+        here — JSON is enforced via the prompt instruction, the same way
+        ``generate_structured`` falls back when the gateway rejects
+        ``response_format``.
+        """
+        json_instruction = (
+            "\n\nIMPORTANT: Respond with valid JSON only. No markdown, no explanation."
+        )
+        prompt_with_instruction = prompt + json_instruction
+
+        chunks: List[str] = []
+        async for chunk in self.generate_streaming(
+            prompt_with_instruction,
+            system_message=system_message,
+            **kwargs,
+        ):
+            chunks.append(chunk)
+            if on_chunk is not None:
+                try:
+                    on_chunk(chunk)
+                except Exception:  # noqa: BLE001 — consumer errors must not abort the stream
+                    logger.exception("on_chunk callback raised")
+
+        full_text = "".join(chunks)
+        try:
+            return parse_json(full_text)
+        except ValueError:
+            logger.error(
+                "JSON parsing failed on streamed response. First 500 chars: %s",
+                (full_text or "")[:500],
             )
             raise
 
@@ -433,7 +519,7 @@ class CachedLLMClient(LLMClient):
             return await super().generate(prompt, system_message, **kwargs)
 
         cache_key = self._build_cache_key(prompt, system_message, **kwargs)
-        cached = self.cache_manager.get_json(*cache_key)
+        cached = await self.cache_manager.get_json(*cache_key)
 
         if cached is not None:
             logger.debug("LLM cache HIT for prompt: %s...", prompt[:50])
@@ -442,7 +528,7 @@ class CachedLLMClient(LLMClient):
         logger.debug("LLM cache MISS for prompt: %s...", prompt[:50])
         content = await super().generate(prompt, system_message, **kwargs)
 
-        self.cache_manager.set_json(
+        await self.cache_manager.set_json(
             {"content": content}, *cache_key, ttl=settings.cache_llm_ttl
         )
         return content
@@ -457,7 +543,7 @@ class CachedLLMClient(LLMClient):
             return await super().generate_structured(prompt, system_message, **kwargs)
 
         cache_key = self._build_cache_key(prompt, system_message, **kwargs)
-        cached = self.cache_manager.get_json(*cache_key)
+        cached = await self.cache_manager.get_json(*cache_key)
 
         if cached is not None:
             logger.debug("LLM structured cache HIT for prompt: %s...", prompt[:50])
@@ -466,7 +552,48 @@ class CachedLLMClient(LLMClient):
         logger.debug("LLM structured cache MISS for prompt: %s...", prompt[:50])
         json_response = await super().generate_structured(prompt, system_message, **kwargs)
 
-        self.cache_manager.set_json(
+        await self.cache_manager.set_json(
+            {"json_response": json_response}, *cache_key, ttl=settings.cache_llm_ttl
+        )
+        return json_response
+
+    async def generate_structured_stream(
+        self,
+        prompt: str,
+        system_message: str | None = None,
+        on_chunk: Optional[Callable[[str], None]] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        if not self.cache_enabled:
+            return await super().generate_structured_stream(
+                prompt, system_message, on_chunk, **kwargs
+            )
+
+        cache_key = self._build_cache_key(prompt, system_message, **kwargs)
+        cached = await self.cache_manager.get_json(*cache_key)
+
+        if cached is not None:
+            logger.debug(
+                "LLM structured-stream cache HIT for prompt: %s...", prompt[:50]
+            )
+            json_response = cached.get("json_response", {})
+            # Surface the cached payload as a single chunk so streaming
+            # consumers see something other than just design_complete.
+            if on_chunk is not None:
+                try:
+                    on_chunk(json.dumps(json_response))
+                except Exception:  # noqa: BLE001
+                    logger.exception("on_chunk callback raised on cache hit")
+            return json_response
+
+        logger.debug(
+            "LLM structured-stream cache MISS for prompt: %s...", prompt[:50]
+        )
+        json_response = await super().generate_structured_stream(
+            prompt, system_message, on_chunk, **kwargs
+        )
+
+        await self.cache_manager.set_json(
             {"json_response": json_response}, *cache_key, ttl=settings.cache_llm_ttl
         )
         return json_response

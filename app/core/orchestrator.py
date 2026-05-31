@@ -274,11 +274,16 @@ class SystemDesignOrchestrator:
             except Exception:
                 logger.exception("Failed to persist conversation after streaming")
 
-        yield {
-            "type": "done",
-            "data": {
-                "session_id": session_id,
-                "had_error": saw_error,
-                "revision_count": captured_revision_count,
-            },
-        }
+        # Skip the trailing `done` after an error event — the frontend
+        # parser treats `error` as terminal and would reject a subsequent
+        # `done` with StreamSequenceError. The error event is the terminal
+        # signal.
+        if not saw_error:
+            yield {
+                "type": "done",
+                "data": {
+                    "session_id": session_id,
+                    "had_error": saw_error,
+                    "revision_count": captured_revision_count,
+                },
+            }

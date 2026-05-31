@@ -128,10 +128,22 @@ async def generate_system_design_stream(request: Request, query: SystemDesignQue
         )
 
     async def event_generator():
-        """Frame orchestrator events as Server-Sent Events."""
+        """Frame orchestrator events as Server-Sent Events with 15s keep-alives."""
         try:
             orchestrator = SystemDesignOrchestrator()
-            async for event in orchestrator.stream_design(query):
+            stream = orchestrator.stream_design(query).__aiter__()
+            while True:
+                try:
+                    event = await asyncio.wait_for(stream.__anext__(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # SSE comment line — keeps Cloudflare/HF nginx from closing
+                    # the connection during cold-start LLM calls. Frontend
+                    # parsers ignore comment lines, so this is invisible to UI.
+                    yield ": keep-alive\n\n"
+                    continue
+                except StopAsyncIteration:
+                    break
+
                 event_type = event.get("type", "progress")
                 event_data = json.dumps(event.get("data", {}))
                 yield f"event: {event_type}\ndata: {event_data}\n\n"

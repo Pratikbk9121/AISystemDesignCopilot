@@ -192,9 +192,11 @@ async def test_stream_design_hallucination_guard_emits_error_and_skips_arch_save
     session_id = yielded[0]["data"]["session_id"]
     types = [e["type"] for e in yielded]
     assert types[0] == "metadata"
-    assert "error" in types
-    assert types[-1] == "done"
-    assert yielded[-1]["data"]["had_error"] is True
+    # `error` is the terminal signal — no trailing `done` should follow
+    # (the frontend SSE parser treats error as terminal and would reject
+    # a subsequent done with StreamSequenceError).
+    assert types[-1] == "error"
+    assert "done" not in types
 
     history = await orch.state_manager.get_conversation(session_id)
     # No architecture captured -> metadata untouched.

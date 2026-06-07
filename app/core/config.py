@@ -75,7 +75,10 @@ class Settings(BaseSettings):
     # Model Configuration
     model: str = "gpt-4.1-mini"  # Bifrost default; openai_compatible uses LLM_MODEL
     embedding_model: str = "text-embedding-3-small"
-    max_tokens: int = 4096
+    # 8192 gives Gemini 2.5 Flash room for its thinking-token budget
+    # plus a complete structured design response. 4096 routinely truncated
+    # mid-JSON when the architecture had embedded API examples.
+    max_tokens: int = 8192
     temperature: float = 0.7
 
     # Embedding Provider Configuration
@@ -168,8 +171,13 @@ class Settings(BaseSettings):
     enable_hybrid_retrieval: bool = Field(
         default=True, alias="ENABLE_HYBRID_RETRIEVAL"
     )
+    # Cross-encoder rerank (BAAI/bge-reranker-v2-m3) is OFF by default.
+    # Measured on this 15-doc corpus: -0.024 nDCG@5 / -0.083 MRR offline,
+    # and 1/7 vs 4/4 generation success rate live. The code path is kept
+    # so the eval ablation can A/B it and so it can be re-enabled when
+    # the corpus grows large enough to benefit from cross-encoder rerank.
     enable_cross_encoder_rerank: bool = Field(
-        default=True, alias="ENABLE_CROSS_ENCODER_RERANK"
+        default=False, alias="ENABLE_CROSS_ENCODER_RERANK"
     )
     reranker_model: str = Field(
         default="BAAI/bge-reranker-v2-m3", alias="RERANKER_MODEL"

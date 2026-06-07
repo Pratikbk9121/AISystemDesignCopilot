@@ -14,6 +14,11 @@ from app.models.schemas import EvaluationResult, SystemArchitecture
 # Non-greedy with DOTALL so it tolerates newlines and trailing prose.
 _JSON_BLOCK_RE = re.compile(r"(\{.*\}|\[.*\])", re.DOTALL)
 
+# Gemini and some other LLMs occasionally emit JSON with trailing commas
+# (`..., "Search Service",\n]`). Python's stdlib `json` rejects these, so we
+# strip them as a last-chance recovery before raising.
+_TRAILING_COMMA_RE = re.compile(r",(\s*[\]}])")
+
 
 def parse_json(text: str) -> Any:
     """
@@ -36,6 +41,20 @@ def parse_json(text: str) -> Any:
     """
     if text is None:
         raise ValueError("parse_json received None")
+
+    # Coerce list-of-parts payloads (Gemini OpenAI-compat occasionally
+    # returns message.content as a list of {"type":"text","text":"..."}
+    # parts) into a single string.
+    if isinstance(text, list):
+        parts: list[str] = []
+        for part in text:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+            else:
+                parts.append(json.dumps(part))
+        text = "".join(parts)
 
     # 1. Direct parse
     try:
@@ -60,15 +79,47 @@ def parse_json(text: str) -> Any:
 
     # 3. Regex-extract first JSON-looking block
     match = _JSON_BLOCK_RE.search(cleaned)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
+    candidate = match.group(1) if match else cleaned
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
 
-    # 4. Give up with a useful error
+    # 3b. Strip trailing commas (a Gemini-ism) and retry.
+    no_trailing = _TRAILING_COMMA_RE.sub(r"\1", candidate)
+    try:
+        return json.loads(no_trailing)
+    except json.JSONDecodeError:
+        pass
+
+    # 4. Give up with a useful error. In debug mode, dump the full text to
+    # a temp file so the offending LLM output can be inspected; in prod we
+    # skip the dump to avoid filling /tmp under sustained parse failures.
+    dump_path: str | None = None
+    try:
+        from app.core.config import settings as _settings
+        if _settings.debug:
+            import os, tempfile, time
+            dump_path = os.path.join(
+                tempfile.gettempdir(), f"parse_json_fail_{int(time.time())}.txt"
+            )
+            try:
+                with open(dump_path, "w") as f:
+                    f.write(text)
+            except Exception:
+                dump_path = "<dump failed>"
+    except Exception:
+        # Settings import shouldn't ever fail here, but if it does we
+        # still want to raise the parse error below.
+        dump_path = None
+
     snippet = (text[:300] + "...") if len(text) > 300 else text
-    raise ValueError(f"Could not parse JSON from response. Snippet: {snippet!r}")
+    detail = f"Length={len(text)}"
+    if dump_path:
+        detail += f" dump={dump_path}"
+    raise ValueError(
+        f"Could not parse JSON from response. {detail} Snippet: {snippet!r}"
+    )
 
 
 class StructuredOutputParser:

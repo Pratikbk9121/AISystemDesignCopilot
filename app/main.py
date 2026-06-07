@@ -89,8 +89,10 @@ async def lifespan(app: FastAPI):
     Ordered startup phases:
         A. Config sanity      — defensive guard on TEKION_LLM_KEY
         B. Bifrost probe      — optional; in prod, "down" raises
-        C. Qdrant init + seed — optional bootstrap when collection is empty
-        D. Redis init         — soft dep; logs WARN with cost note if disabled
+        C. Redis init         — soft dep; must run BEFORE Qdrant so the
+                                vector store can be built with a
+                                CachedEmbeddingGenerator
+        D. Qdrant init + seed — optional bootstrap when collection is empty
         E. Summary log        — single STARTUP_SUMMARY line for ops/dashboards
     Shutdown closes Qdrant (releases file lock) then Redis.
     """
@@ -127,14 +129,71 @@ async def lifespan(app: FastAPI):
             )
         logger.info("Bifrost probe: %s", bifrost_status)
 
-    # --- Phase C: Qdrant init + optional auto-seed -------------------------
+    # --- Phase C: Redis init ----------------------------------------------
+    # Runs BEFORE Qdrant so the embedding cache exists when the vector
+    # store is constructed — otherwise QdrantVectorStore's default
+    # EmbeddingGenerator() bypasses Redis for the lifetime of the process.
+    redis_status = "disabled"
+    embedding_cache = None
+    if settings.redis_enabled:
+        try:
+            redis_client = get_redis_client()
+            if await redis_client.is_available():
+                embedding_cache = CacheManager(redis_client, namespace="emb:")
+                llm_cache = CacheManager(redis_client, namespace="llm:")
+                conversation_cache = CacheManager(redis_client, namespace="conv:")
+                set_cache_managers(
+                    embedding_cache=embedding_cache,
+                    llm_cache=llm_cache,
+                    conversation_cache=conversation_cache,
+                )
+                redis_status = "ok"
+                logger.info(
+                    "Redis cache initialized (emb_ttl=%ds llm_ttl=%ds conv_ttl=%ds)",
+                    settings.cache_embedding_ttl,
+                    settings.cache_llm_ttl,
+                    settings.cache_conversation_ttl,
+                )
+            else:
+                redis_status = "unavailable"
+                logger.warning(
+                    "Redis unreachable — running without cache. "
+                    "Expect higher LLM latency and embedding-provider cost."
+                )
+        except Exception as e:
+            redis_status = "error"
+            logger.error(
+                "Redis init failed; continuing without cache "
+                "(higher latency + LLM/embedding cost): %s",
+                e,
+                exc_info=True,
+            )
+    else:
+        logger.warning(
+            "REDIS_ENABLED=false — caching disabled. "
+            "Expect higher LLM latency and embedding-provider cost."
+        )
+
+    # --- Phase D: Qdrant init + optional auto-seed -------------------------
     qdrant_status = "down"
     points_count = 0
     try:
         from app.core.rag import QdrantVectorStore
         from app.core.rag.bootstrap import bootstrap_knowledge
+        from app.core.rag.embeddings import (
+            CachedEmbeddingGenerator,
+            EmbeddingGenerator,
+        )
 
-        vector_store = QdrantVectorStore()
+        # Inject a CachedEmbeddingGenerator when Redis is up so query- and
+        # passage-side embeddings hit the `emb:` namespace. Falls back to the
+        # uncached generator when Redis is disabled/unreachable.
+        embedding_generator = (
+            CachedEmbeddingGenerator(cache_manager=embedding_cache)
+            if embedding_cache is not None
+            else EmbeddingGenerator()
+        )
+        vector_store = QdrantVectorStore(embedding_generator=embedding_generator)
         set_vector_store(vector_store)
 
         info = vector_store.get_collection_info()
@@ -194,47 +253,6 @@ async def lifespan(app: FastAPI):
             exc_info=True,
         )
         qdrant_status = "degraded"
-
-    # --- Phase D: Redis init ----------------------------------------------
-    redis_status = "disabled"
-    if settings.redis_enabled:
-        try:
-            redis_client = get_redis_client()
-            if await redis_client.is_available():
-                embedding_cache = CacheManager(redis_client, namespace="emb:")
-                llm_cache = CacheManager(redis_client, namespace="llm:")
-                conversation_cache = CacheManager(redis_client, namespace="conv:")
-                set_cache_managers(
-                    embedding_cache=embedding_cache,
-                    llm_cache=llm_cache,
-                    conversation_cache=conversation_cache,
-                )
-                redis_status = "ok"
-                logger.info(
-                    "Redis cache initialized (emb_ttl=%ds llm_ttl=%ds conv_ttl=%ds)",
-                    settings.cache_embedding_ttl,
-                    settings.cache_llm_ttl,
-                    settings.cache_conversation_ttl,
-                )
-            else:
-                redis_status = "unavailable"
-                logger.warning(
-                    "Redis unreachable — running without cache. "
-                    "Expect higher LLM latency and embedding-provider cost."
-                )
-        except Exception as e:
-            redis_status = "error"
-            logger.error(
-                "Redis init failed; continuing without cache "
-                "(higher latency + LLM/embedding cost): %s",
-                e,
-                exc_info=True,
-            )
-    else:
-        logger.warning(
-            "REDIS_ENABLED=false — caching disabled. "
-            "Expect higher LLM latency and embedding-provider cost."
-        )
 
     # --- Phase E: Summary --------------------------------------------------
     logger.info(

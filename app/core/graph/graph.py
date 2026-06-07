@@ -236,10 +236,26 @@ class SystemDesignGraph:
         """
         system_message, user_prompt = self._build_design_prompt(state)
 
+        # Stream LLM tokens out as ``design_chunk`` custom events so
+        # /query-stream can forward them as SSE before the node returns
+        # (the frontend's IncrementalArchitectureParser consumes partial
+        # JSON). When the graph is run via ``ainvoke`` (no streaming
+        # consumer), ``get_stream_writer`` still returns a writer but
+        # nothing reads the custom channel — effectively a no-op.
+        writer = get_stream_writer()
+
+        def _emit_chunk(chunk: str) -> None:
+            try:
+                writer({"type": "design_chunk", "data": {"chunk": chunk}})
+            except Exception:  # noqa: BLE001 — writer errors must not abort generation
+                logger.exception("design_chunk writer failed")
+
         if settings.tools_enabled and TOOL_SPECS:
-            # Tool-use path still buffers — the multi-turn loop has to
-            # interleave tool_calls/tool messages before the final answer,
-            # so per-token streaming isn't meaningful here.
+            # Tool-use path now streams too: each iteration is run with
+            # ``stream=True`` and content tokens are surfaced via
+            # ``on_chunk``. Earlier rounds typically emit only
+            # ``tool_calls`` (zero content), so chunks are forwarded only
+            # on the terminal round that produces the JSON answer.
             json_instruction = (
                 "\n\nWhen you are done with any tool calls, respond with the final "
                 "JSON architecture only — no markdown, no prose."
@@ -250,23 +266,10 @@ class SystemDesignGraph:
                 tools=TOOL_SPECS,
                 tool_dispatcher=dispatch_tool,
                 max_iterations=settings.tool_max_iterations,
+                on_chunk=_emit_chunk,
             )
             response = parse_json(response_text)
         else:
-            # Stream LLM tokens out as ``design_chunk`` custom events so
-            # /query-stream can forward them as SSE before the node returns
-            # (the frontend's IncrementalArchitectureParser consumes partial
-            # JSON). When the graph is run via ``ainvoke`` (no streaming
-            # consumer), ``get_stream_writer`` still returns a writer but
-            # nothing reads the custom channel — effectively a no-op.
-            writer = get_stream_writer()
-
-            def _emit_chunk(chunk: str) -> None:
-                try:
-                    writer({"type": "design_chunk", "data": {"chunk": chunk}})
-                except Exception:  # noqa: BLE001 — writer errors must not abort generation
-                    logger.exception("design_chunk writer failed")
-
             response = await self.llm_client.generate_structured_stream(
                 prompt=user_prompt,
                 system_message=system_message,

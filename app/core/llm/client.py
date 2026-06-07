@@ -331,6 +331,7 @@ class LLMClient:
         tools: List[Dict[str, Any]],
         tool_dispatcher: Callable[[str, Dict[str, Any]], Dict[str, Any]],
         max_iterations: int = 4,
+        on_chunk: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> Tuple[str, List[Dict[str, Any]]]:
         """
@@ -343,6 +344,14 @@ class LLMClient:
         feed back to the model.  If the loop hits the iteration cap we
         force a final answer by running one more call without ``tools``.
 
+        Every iteration is run as a streaming request so the terminal
+        round (the one without ``tool_calls``) can surface its content
+        tokens live via ``on_chunk``. Earlier rounds typically emit only
+        ``tool_calls`` (no content), so ``on_chunk`` is usually invoked
+        only on the final round — exactly the round that produces the
+        JSON architecture answer. ``tool_calls`` deltas are accumulated
+        per-index and dispatched at end-of-stream.
+
         Args:
             prompt: User prompt string.
             system_message: Optional system message (the architecture
@@ -353,6 +362,11 @@ class LLMClient:
                 used to execute each tool. Should be fast / non-blocking.
             max_iterations: Hard cap on tool-call rounds. Prevents
                 runaway loops if the model gets stuck.
+            on_chunk: Optional callback invoked for every content delta
+                across all iterations. Used by the streaming graph node
+                to forward ``design_chunk`` SSE events so /query-stream
+                renders the architecture as it materialises, even when
+                tool use is enabled.
             **kwargs: Forwarded as request args (temperature, max_tokens).
 
         Returns:
@@ -367,48 +381,44 @@ class LLMClient:
         max_tokens = kwargs.get("max_tokens", settings.max_tokens)
 
         for iteration in range(max_iterations):
-            response = await self.client.chat.completions.create(
-                model=self.model,
+            assembled_content, ordered_calls = await self._stream_tool_iteration(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tools=tools,
-                tool_choice="auto",
+                on_chunk=on_chunk,
             )
-            self._record_usage(getattr(response, "usage", None))
 
-            assistant_msg = response.choices[0].message
-            requested_calls = getattr(assistant_msg, "tool_calls", None) or []
+            if not ordered_calls:
+                # Model produced a final answer — we're done. The content
+                # tokens already streamed live via ``on_chunk``.
+                return assembled_content, tool_calls_made
 
-            if not requested_calls:
-                # Model produced a final answer — we're done.
-                return assistant_msg.content or "", tool_calls_made
-
-            # Echo the assistant tool-call message back into the conversation
-            # exactly as the API requires, then append one ``tool`` role
-            # message per executed call.
+            # Echo the assistant tool-call message back into the
+            # conversation exactly as the API requires, then append one
+            # ``tool`` role message per executed call.
             messages.append(
                 {
                     "role": "assistant",
-                    "content": assistant_msg.content or "",
+                    "content": assembled_content,
                     "tool_calls": [
                         {
-                            "id": tc.id,
+                            "id": buf["id"],
                             "type": "function",
                             "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
+                                "name": buf["name"],
+                                "arguments": buf["arguments"],
                             },
                         }
-                        for tc in requested_calls
+                        for buf in ordered_calls
                     ],
                 }
             )
 
-            for tc in requested_calls:
-                name = tc.function.name
+            for buf in ordered_calls:
+                name = buf["name"]
                 try:
-                    args = json.loads(tc.function.arguments or "{}")
+                    args = json.loads(buf["arguments"] or "{}")
                 except json.JSONDecodeError:
                     args = {}
                 result = tool_dispatcher(name, args)
@@ -416,7 +426,7 @@ class LLMClient:
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": tc.id,
+                        "tool_call_id": buf["id"],
                         "content": json.dumps(result, default=str),
                     }
                 )
@@ -424,22 +434,97 @@ class LLMClient:
             logger.info(
                 "tool-use round %d: executed %d call(s) (%s)",
                 iteration + 1,
-                len(requested_calls),
-                ", ".join(tc.function.name for tc in requested_calls),
+                len(ordered_calls),
+                ", ".join(buf["name"] for buf in ordered_calls),
             )
 
-        # Cap exhausted — force a final answer with tools disabled.
+        # Cap exhausted — force a final answer with tools disabled. Still
+        # streamed so the user sees the eventual answer materialise.
         logger.warning(
             "Tool loop hit max_iterations=%d; forcing final answer.", max_iterations
         )
-        final = await self.client.chat.completions.create(
-            model=self.model,
+        final_text, _ = await self._stream_tool_iteration(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            tools=None,
+            on_chunk=on_chunk,
         )
-        self._record_usage(getattr(final, "usage", None))
-        return final.choices[0].message.content or "", tool_calls_made
+        return final_text, tool_calls_made
+
+    async def _stream_tool_iteration(
+        self,
+        *,
+        messages: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        tools: Optional[List[Dict[str, Any]]],
+        on_chunk: Optional[Callable[[str], None]],
+    ) -> Tuple[str, List[Dict[str, str]]]:
+        """Run one streaming chat-completion round.
+
+        Returns ``(assembled_content, ordered_tool_calls)``. ``ordered_tool_calls``
+        is empty when the model produced a terminal answer (no ``tool_calls``).
+        Each tool-call entry is ``{"id", "name", "arguments"}`` with arguments
+        as a raw (concatenated) JSON string — caller parses.
+
+        ``tool_calls`` deltas are accumulated per-``index``; the OpenAI
+        stream format sends ``id`` and ``function.name`` once on the first
+        delta of each index, and ``function.arguments`` as concatenated
+        partial strings across subsequent deltas.
+        """
+        request_kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools is not None:
+            request_kwargs["tools"] = tools
+            request_kwargs["tool_choice"] = "auto"
+
+        stream = await self.client.chat.completions.create(**request_kwargs)
+
+        content_parts: List[str] = []
+        tool_call_buf: Dict[int, Dict[str, str]] = {}
+
+        async for chunk in stream:
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                self._record_usage(usage)
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta is None:
+                continue
+
+            if delta.content:
+                content_parts.append(delta.content)
+                if on_chunk is not None:
+                    try:
+                        on_chunk(delta.content)
+                    except Exception:  # noqa: BLE001 — consumer must not abort
+                        logger.exception("on_chunk callback raised")
+
+            tcs = getattr(delta, "tool_calls", None) or []
+            for tc in tcs:
+                idx = tc.index
+                buf = tool_call_buf.setdefault(
+                    idx, {"id": "", "name": "", "arguments": ""}
+                )
+                if tc.id:
+                    buf["id"] = tc.id
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    if fn.name:
+                        buf["name"] = fn.name
+                    if fn.arguments:
+                        buf["arguments"] += fn.arguments
+
+        ordered_calls = [tool_call_buf[i] for i in sorted(tool_call_buf)]
+        return "".join(content_parts), ordered_calls
 
     async def generate_streaming(
         self,

@@ -39,6 +39,10 @@ class SystemDesignState(TypedDict, total=False):
     confidence_metrics: Dict[str, Any]
     hallucination_guard_triggered: bool
     insufficient_context_response: Dict[str, Any]
+    # Degraded mode: low confidence but still generated (Perplexity-style
+    # "best effort" UX). Labelled as extrapolated from related patterns.
+    degraded_context: bool
+    related_patterns: List[str]
 
     # --- Generated outputs ---
     architecture_json: Dict[str, Any] | None

@@ -38,8 +38,12 @@ ENV/
 .env
 .env.local
 
-# Data
-data/
+# Data — corpus source docs are tracked; vector store + binary artifacts are not.
+# Markdown corpus is required at Docker build time to bake the Qdrant index.
+data/*
+!data/system_design_docs/
+data/system_design_docs/*
+!data/system_design_docs/*.md
 *.pkl
 *.faiss
 

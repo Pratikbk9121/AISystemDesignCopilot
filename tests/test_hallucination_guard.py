@@ -68,13 +68,64 @@ def test_happy_path_passes_all_checks():
 
 @pytest.mark.asyncio
 async def test_force_generation_bypasses_checks():
-    """force_generation=True returns (True, None) regardless of context."""
+    """force_generation=True returns status='proceed' regardless of context."""
     guard = HallucinationGuard()
-    proceed, insufficient = await guard.should_proceed_with_generation(
+    status, insufficient, related = await guard.should_proceed_with_generation(
         query="anything", retrieved_docs=[], force_generation=True
     )
-    assert proceed is True
+    assert status == "proceed"
     assert insufficient is None
+    assert related == []
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_degrades_instead_of_refusing():
+    """Confidence in [degrade_lower_bound, threshold) returns 'degraded'."""
+    fake_vs = MagicMock()
+    guard = HallucinationGuard(
+        min_documents=1,
+        min_similarity_threshold=0.3,
+        min_confidence_threshold=0.7,
+        degrade_lower_bound=0.3,
+        vector_store=fake_vs,
+    )
+    fake_analyzer = MagicMock()
+    fake_analyzer.suggest_similar_topics = AsyncMock(return_value=["Twitter"])
+    guard.knowledge_analyzer = fake_analyzer
+
+    docs = [(_doc("Twitter uses fan-out-on-write for feed delivery."), 0.55)]
+    status, payload, related = await guard.should_proceed_with_generation(
+        query="design instagram", retrieved_docs=docs
+    )
+    assert status == "degraded"
+    assert payload is None
+    assert related == ["Twitter"]
+
+
+@pytest.mark.asyncio
+async def test_hard_refuse_when_confidence_below_degrade_floor():
+    """Confidence < degrade_lower_bound hard-refuses with payload."""
+    fake_vs = MagicMock()
+    guard = HallucinationGuard(
+        min_documents=1,
+        min_similarity_threshold=0.0,
+        min_confidence_threshold=0.7,
+        degrade_lower_bound=0.5,
+        vector_store=fake_vs,
+    )
+    fake_analyzer = MagicMock()
+    fake_analyzer.get_available_topics.return_value = {"topics": [], "example_queries": []}
+    fake_analyzer.suggest_similar_topics = AsyncMock(return_value=[])
+    guard.knowledge_analyzer = fake_analyzer
+
+    docs = [(_doc("Irrelevant blob."), 0.05)]
+    status, payload, related = await guard.should_proceed_with_generation(
+        query="design quantum teleportation", retrieved_docs=docs
+    )
+    assert status == "refuse"
+    assert payload is not None
+    assert payload["message"] == "Not enough data"
+    assert related == []
 
 
 @pytest.mark.asyncio

@@ -2,9 +2,19 @@
 Confidence Scoring for RAG responses
 Evaluates the quality of retrieved context and response reliability
 """
-from typing import List, Tuple, Dict, Any
+import math
+from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 from app.core.rag.document_processor import Document
+
+
+def _sigmoid(x: float) -> float:
+    """Numerically-stable logistic sigmoid (cross-encoder scores can be < 0)."""
+    if x >= 0:
+        z = math.exp(-x)
+        return 1.0 / (1.0 + z)
+    z = math.exp(x)
+    return z / (1.0 + z)
 
 
 class ConfidenceScorer:
@@ -64,64 +74,101 @@ class ConfidenceScorer:
     def calculate_coverage_confidence(
         self,
         query: str,
-        retrieved_docs: List[Tuple[Document, float]]
+        retrieved_docs: List[Tuple[Document, float]],
+        cross_encoder_scores: Optional[List[float]] = None,
     ) -> float:
         """
-        Calculate confidence based on context coverage of the query
-        
+        Calculate confidence based on semantic context coverage of the query.
+
+        WAVE 1A CHANGE — semantic coverage replaces keyword overlap.
+        WAVE 2B CHANGE — optional cross-encoder signal overrides similarity.
+
+        The legacy implementation computed
+        ``|query_keywords ∩ retrieved_doc_keywords| / |query_keywords|``,
+        which under-counted any semantic match where the corpus uses
+        different words than the query (e.g. "design Instagram" vs. a
+        "Twitter, photo sharing" doc would score ~0). That signal is a
+        well-documented RAG anti-pattern — RAGAS, TruLens, and Vespa all
+        moved to embedding-based coverage signals.
+
+        New approach: ``retrieved_docs`` is already ``List[(Document, score)]``
+        where ``score`` is the cosine similarity returned by the vector
+        store. We treat the mean similarity as the coverage signal (it IS
+        the embedding-space measure of how well the corpus covers the
+        query), with a small bonus for having multiple supporting docs.
+
+        When ``cross_encoder_scores`` is provided, those scores are used
+        instead of the bi-encoder similarities. Cross-encoder scores are
+        unbounded (often negative for irrelevant pairs), so each is passed
+        through a logistic sigmoid first.
+
+        Formula (either path)::
+
+            coverage = mean(scores)  * 0.8
+                       + min(0.2, len(docs) * 0.04)
+
+        clamped to ``[0.0, 1.0]``.
+
         Args:
-            query: User query
-            retrieved_docs: Retrieved documents
-        
+            query: User query (kept in the signature for backwards
+                compatibility; the new signal is computed from the
+                similarity / cross-encoder scores, so the query string is
+                not directly consulted here).
+            retrieved_docs: Retrieved ``(Document, similarity_score)`` pairs
+                from the vector store.
+            cross_encoder_scores: Optional list of raw cross-encoder scores
+                (one per retrieved doc, same order). When given, used as the
+                coverage signal instead of similarity. Sigmoid-normalized
+                before averaging.
+
         Returns:
-            Coverage confidence score (0.0 - 1.0)
+            Coverage confidence score in ``[0.0, 1.0]``.
         """
         if not retrieved_docs:
             return 0.0
-        
-        # Extract important keywords from query
-        query_words = set(query.lower().split())
-        
-        # Remove common stop words
-        stop_words = {"the", "a", "an", "in", "on", "at", "to", "for", "of", "and", "or", "but", "is", "are", "was", "were"}
-        query_keywords = query_words - stop_words
-        
-        if not query_keywords:
-            return 0.5  # Neutral if no meaningful keywords
-        
-        # Check how many keywords are covered in retrieved docs
-        all_doc_content = " ".join([doc.content.lower() for doc, _ in retrieved_docs])
-        covered_keywords = sum(1 for kw in query_keywords if kw in all_doc_content)
-        
-        coverage_ratio = covered_keywords / len(query_keywords)
-        
-        # Boost if we have multiple documents covering the topic
-        num_docs_bonus = min(0.2, len(retrieved_docs) * 0.04)  # Max 0.2 bonus
-        
-        confidence = min(1.0, coverage_ratio + num_docs_bonus)
-        
-        return confidence
+
+        if cross_encoder_scores is not None and len(cross_encoder_scores) == len(retrieved_docs):
+            # Cross-encoder path: sigmoid-normalize since scores can be negative.
+            normalized = [_sigmoid(float(s)) for s in cross_encoder_scores]
+            mean_score = float(np.mean(normalized))
+        else:
+            # Fallback: similarity-score path (Wave 1A signal).
+            scores = [score for _, score in retrieved_docs]
+            mean_score = float(np.mean(scores))
+
+        # Mild bonus for multi-doc support — caps at +0.2 (5 docs).
+        num_docs_bonus = min(0.2, len(retrieved_docs) * 0.04)
+
+        coverage = mean_score * 0.8 + num_docs_bonus
+        return max(0.0, min(1.0, coverage))
     
     def calculate_overall_confidence(
         self,
         query: str,
         retrieved_docs: List[Tuple[Document, float]],
-        response_content: str = ""
+        response_content: str = "",
+        cross_encoder_scores: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
         """
-        Calculate overall confidence score with detailed breakdown
-        
+        Calculate overall confidence score with detailed breakdown.
+
         Args:
-            query: User query
-            retrieved_docs: Retrieved documents with scores
-            response_content: Generated response (optional)
-        
+            query: User query.
+            retrieved_docs: Retrieved documents with scores.
+            response_content: Generated response (optional, currently unused).
+            cross_encoder_scores: Optional raw cross-encoder scores (one per
+                retrieved doc, same order). When provided, the coverage
+                component uses sigmoid-normalized cross-encoder scores
+                instead of bi-encoder similarities.
+
         Returns:
-            Dictionary with confidence scores and metadata
+            Dictionary with confidence scores and metadata.
         """
         # Calculate component scores
         retrieval_confidence = self.calculate_retrieval_confidence(retrieved_docs)
-        coverage_confidence = self.calculate_coverage_confidence(query, retrieved_docs)
+        coverage_confidence = self.calculate_coverage_confidence(
+            query, retrieved_docs, cross_encoder_scores=cross_encoder_scores
+        )
         
         # Calculate overall confidence (weighted average)
         overall_confidence = (

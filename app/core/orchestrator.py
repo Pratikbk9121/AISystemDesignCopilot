@@ -17,7 +17,7 @@ Implementation (what callers don't see):
 All session and state management complexity is hidden behind this seam.
 """
 import logging
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator, Dict, List, Optional
 from uuid import uuid4
 
 from app.models.schemas import (
@@ -168,9 +168,22 @@ class SystemDesignOrchestrator:
         confidence_metrics_data = final_state.get("confidence_metrics", {})
         confidence_metrics = ConfidenceMetrics(**confidence_metrics_data) if confidence_metrics_data else None
 
-        # Check for medium confidence (0.3-0.6) and add warning
+        # Degraded mode (guard didn't hard-refuse but confidence is in the
+        # extrapolation band). Take precedence over the generic medium-
+        # confidence warning since the message is more specific.
+        degraded_context = bool(final_state.get("degraded_context", False))
+        related_patterns = list(final_state.get("related_patterns") or [])
+
         confidence_warning = None
-        if confidence_metrics:
+        if degraded_context:
+            related_str = ", ".join(related_patterns) if related_patterns else "no exact matches"
+            confidence_warning = (
+                f"⚠️ Limited Match: This design is extrapolated from related "
+                f"reference patterns ({related_str}). Treat it as a starting "
+                f"point and validate against authoritative sources."
+            )
+        elif confidence_metrics:
+            # Check for medium confidence (0.3-0.6) and add warning
             conf_score = confidence_metrics.overall_confidence
             if 0.3 <= conf_score < 0.6:
                 confidence_warning = (
@@ -196,12 +209,14 @@ class SystemDesignOrchestrator:
             retrieved_context=retrieved_context,
             confidence_metrics=confidence_metrics,
             confidence_warning=confidence_warning,
+            degraded_mode=degraded_context,
+            related_patterns=related_patterns,
             revision_count=int(final_state.get("revision_count", 0)),
             tool_calls=tool_calls,
         )
 
         # Step 7: Save conversation state (architecture + assistant message)
-        conversation_history.metadata["last_architecture"] = architecture.dict()
+        conversation_history.metadata["last_architecture"] = architecture.model_dump(mode="json")
         conversation_history.add_message("assistant", explanation)
         await self.state_manager.save_conversation(session_id, conversation_history)
 
@@ -235,6 +250,11 @@ class SystemDesignOrchestrator:
         captured_explanation: str = ""
         captured_revision_count: int = 0
         saw_error: bool = False
+        # Parity with the sync path: surface degraded-mode signals and
+        # the full insufficient-knowledge payload to streaming consumers.
+        captured_degraded_mode: bool = False
+        captured_related_patterns: List[str] = []
+        captured_insufficient: Optional[Dict[str, Any]] = None
 
         yield {
             "type": "metadata",
@@ -261,6 +281,18 @@ class SystemDesignOrchestrator:
                         captured_explanation = edata["explanation"]
                     if "revision_count" in edata:
                         captured_revision_count = edata["revision_count"]
+                elif etype == "degraded":
+                    captured_degraded_mode = True
+                    captured_related_patterns = list(
+                        edata.get("related_patterns") or []
+                    )
+                elif etype == "insufficient_knowledge":
+                    # User-data condition (not a system error), but it is
+                    # terminal for this run — suppress the trailing `done`
+                    # the same way we do for real errors so the frontend
+                    # parser treats it as the end of stream.
+                    captured_insufficient = dict(edata)
+                    saw_error = True
                 elif etype == "error":
                     saw_error = True
                 yield event
@@ -270,6 +302,17 @@ class SystemDesignOrchestrator:
                     history.metadata["last_architecture"] = captured_architecture
                 if captured_explanation:
                     history.add_message("assistant", captured_explanation)
+                elif captured_insufficient is not None:
+                    # Mirror the sync path: when the hallucination guard
+                    # fires there is no architecture/explanation, but we
+                    # still want the assistant's "not enough data" reply
+                    # in the conversation history.
+                    insufficient_explanation = (
+                        captured_insufficient.get("explanation")
+                        or captured_insufficient.get("message")
+                        or "Not enough data to answer your question"
+                    )
+                    history.add_message("assistant", insufficient_explanation)
                 await self.state_manager.save_conversation(session_id, history)
             except Exception:
                 logger.exception("Failed to persist conversation after streaming")
@@ -285,5 +328,7 @@ class SystemDesignOrchestrator:
                     "session_id": session_id,
                     "had_error": saw_error,
                     "revision_count": captured_revision_count,
+                    "degraded_mode": captured_degraded_mode,
+                    "related_patterns": captured_related_patterns,
                 },
             }

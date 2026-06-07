@@ -52,15 +52,29 @@ def test_low_top_score_triggers_threshold_penalty():
     assert high_conf - low_conf > 0.2
 
 
-def test_stop_words_only_query_returns_neutral_coverage():
-    """A query with only stop words has no keywords → neutral (0.5)."""
+def test_coverage_tracks_retrieval_similarity():
+    """Semantic coverage: mean(scores)*0.8 + doc-count bonus, clamped [0,1].
+
+    Replaces the legacy keyword-overlap heuristic. The new signal is
+    embedding-driven, so stop-words in the query no longer change the
+    outcome — only the retrieved doc scores matter.
+    """
     scorer = ConfidenceScorer()
-    docs = [(_doc("Some content"), 0.7)]
-    coverage = scorer.calculate_coverage_confidence(
-        query="the a an the of",
-        retrieved_docs=docs,
+
+    high = scorer.calculate_coverage_confidence(
+        query="anything", retrieved_docs=[(_doc("x"), 0.9)]
     )
-    assert coverage == 0.5
+    low = scorer.calculate_coverage_confidence(
+        query="anything", retrieved_docs=[(_doc("x"), 0.2)]
+    )
+    assert high > low
+    # 0.9 * 0.8 + 0.04 = 0.76
+    assert abs(high - 0.76) < 1e-6
+    # 0.2 * 0.8 + 0.04 = 0.20
+    assert abs(low - 0.20) < 1e-6
+
+    # Empty docs → 0.0 (no signal at all, treated as no coverage).
+    assert scorer.calculate_coverage_confidence(query="q", retrieved_docs=[]) == 0.0
 
 
 def test_calculate_overall_confidence_returns_full_breakdown():

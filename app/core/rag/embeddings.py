@@ -13,6 +13,19 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# BGE models (BAAI/bge-*) recommend prefixing QUERIES (not passages) with a
+# short instruction so the bi-encoder maps queries into the same semantic
+# region as passages. See the BAAI/bge-base-en-v1.5 model card. We apply it
+# only when (provider == "huggingface" AND model startswith "BAAI/bge") to
+# avoid polluting other embedding stacks.
+_BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+
+def _bge_query_prefix_applies(provider: str, model_name: str) -> bool:
+    """Return True iff the active embedding stack benefits from the BGE
+    query-side instruction prefix."""
+    return provider.lower() == "huggingface" and model_name.startswith("BAAI/bge")
+
 
 class EmbeddingGenerator:
     """
@@ -115,7 +128,24 @@ class EmbeddingGenerator:
 
         return 768  # Default dimension
 
-    async def generate_embedding(self, text: str) -> np.ndarray:
+    def _maybe_prefix_query(self, text: str, is_query: bool) -> str:
+        """Apply the BGE query-side instruction prefix when applicable.
+
+        Only triggers for ``provider == "huggingface"`` AND a ``BAAI/bge*``
+        model. All other configurations get the raw text back. This must
+        run BEFORE any cache lookup so cached vectors stay consistent with
+        the actual encoded input.
+        """
+        if not is_query:
+            return text
+        model_name = self.model or settings.huggingface_model
+        if _bge_query_prefix_applies(self.provider, model_name):
+            return f"{_BGE_QUERY_PREFIX}{text}"
+        return text
+
+    async def generate_embedding(
+        self, text: str, is_query: bool = False
+    ) -> np.ndarray:
         """
         Generate embedding for a single text using LangChain.
 
@@ -123,28 +153,50 @@ class EmbeddingGenerator:
         caching subclass is in play. The underlying LangChain call itself is
         sync — wrap via asyncio.to_thread when called from an async context
         if you need to free the event loop.
+
+        Args:
+            text: Text to embed.
+            is_query: When True and the active stack is BGE+HuggingFace, the
+                BGE query-side instruction prefix is prepended. Pass True from
+                vector-search call sites; leave False (default) for passage
+                embeddings to keep the index identical to its build-time
+                ingestion vectors.
         """
         try:
+            effective_text = self._maybe_prefix_query(text, is_query)
             # Use LangChain's embed_query method
-            embedding = self.embeddings.embed_query(text)
+            embedding = self.embeddings.embed_query(effective_text)
             return np.array(embedding, dtype=np.float32)
 
         except Exception as e:
             raise RuntimeError(f"Failed to generate embedding: {str(e)}") from e
 
-    async def generate_embeddings(self, texts: List[str]) -> List[np.ndarray]:
+    async def generate_embeddings(
+        self, texts: List[str], is_query: bool = False
+    ) -> List[np.ndarray]:
         """
         Generate embeddings for multiple texts using LangChain (batched).
 
         Async-by-interface so callers can ``await`` regardless of whether the
         caching subclass is in play.
+
+        Args:
+            texts: Texts to embed.
+            is_query: When True and the active stack is BGE+HuggingFace, the
+                BGE query-side instruction prefix is prepended to every text
+                before encoding. Mirrors :meth:`generate_embedding`.
         """
         if not texts:
             return []
 
         try:
+            effective_texts = (
+                [self._maybe_prefix_query(t, is_query=True) for t in texts]
+                if is_query
+                else texts
+            )
             # Use LangChain's embed_documents method for batch processing
-            embeddings = self.embeddings.embed_documents(texts)
+            embeddings = self.embeddings.embed_documents(effective_texts)
 
             # Convert to numpy arrays
             return [np.array(emb, dtype=np.float32) for emb in embeddings]
@@ -155,7 +207,8 @@ class EmbeddingGenerator:
     async def batch_generate_embeddings(
         self,
         texts: List[str],
-        batch_size: int = 100
+        batch_size: int = 100,
+        is_query: bool = False,
     ) -> List[np.ndarray]:
         """
         Generate embeddings in batches for large datasets.
@@ -163,6 +216,7 @@ class EmbeddingGenerator:
         Args:
             texts: List of texts to embed
             batch_size: Number of texts per batch
+            is_query: Forwarded to :meth:`generate_embeddings` for BGE prefix.
 
         Returns:
             List of numpy arrays containing embedding vectors
@@ -171,7 +225,7 @@ class EmbeddingGenerator:
 
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
-            embeddings = await self.generate_embeddings(batch)
+            embeddings = await self.generate_embeddings(batch, is_query=is_query)
             all_embeddings.extend(embeddings)
 
             # Progress logging
@@ -216,13 +270,25 @@ class CachedEmbeddingGenerator(EmbeddingGenerator):
         if self.cache_enabled:
             logger.info("Embedding caching enabled")
 
-    async def generate_embedding(self, text: str) -> np.ndarray:
-        """Generate embedding with caching (async to await Redis I/O)."""
+    async def generate_embedding(
+        self, text: str, is_query: bool = False
+    ) -> np.ndarray:
+        """Generate embedding with caching (async to await Redis I/O).
+
+        ``is_query`` is forwarded to the base class so BGE query-side
+        prefixing kicks in for search calls. The cache key uses the
+        *effective* (prefixed) text so query-cache and passage-cache stay in
+        separate keyspaces and never alias each other.
+        """
         if not self.cache_enabled:
-            return await super().generate_embedding(text)
+            return await super().generate_embedding(text, is_query=is_query)
+
+        cache_key_text = self._maybe_prefix_query(text, is_query)
 
         # Try to get from cache
-        cached = await self.cache_manager.get_pickle(text, self.provider, self.model)
+        cached = await self.cache_manager.get_pickle(
+            cache_key_text, self.provider, self.model
+        )
         if cached is not None:
             logger.debug(f"Embedding cache HIT for text: {text[:50]}...")
             return cached
@@ -233,10 +299,10 @@ class CachedEmbeddingGenerator(EmbeddingGenerator):
         # provider call dominates and is already orchestrated via threadpool
         # in multi_query retrieval.
         logger.debug(f"Embedding cache MISS for text: {text[:50]}...")
-        embedding = await super().generate_embedding(text)
+        embedding = await super().generate_embedding(text, is_query=is_query)
         await self.cache_manager.set_pickle(
             embedding,
-            text,
+            cache_key_text,
             self.provider,
             self.model,
             ttl=settings.cache_embedding_ttl
@@ -244,35 +310,51 @@ class CachedEmbeddingGenerator(EmbeddingGenerator):
 
         return embedding
 
-    async def generate_embeddings(self, texts: List[str]) -> List[np.ndarray]:
-        """Generate embeddings with caching (async to await Redis I/O)."""
+    async def generate_embeddings(
+        self, texts: List[str], is_query: bool = False
+    ) -> List[np.ndarray]:
+        """Generate embeddings with caching (async to await Redis I/O).
+
+        ``is_query``: when True, the BGE query-side instruction prefix is
+        applied to each input text (where applicable) BEFORE embedding and
+        BEFORE cache lookup, mirroring the single-call path so query and
+        passage caches share no keys.
+        """
         if not self.cache_enabled:
-            return await super().generate_embeddings(texts)
+            return await super().generate_embeddings(texts, is_query=is_query)
 
         results = []
-        cache_misses = []
-        cache_miss_indices = []
+        cache_misses = []           # effective (prefixed) texts to embed
+        cache_miss_indices = []     # positions in results for each miss
 
-        # Check cache for each text
+        # Check cache for each text — keyed on the *effective* text so the
+        # query-prefixed variant never aliases the raw-passage variant.
         for idx, text in enumerate(texts):
-            cached = await self.cache_manager.get_pickle(text, self.provider, self.model)
+            cache_key_text = self._maybe_prefix_query(text, is_query)
+            cached = await self.cache_manager.get_pickle(
+                cache_key_text, self.provider, self.model
+            )
             if cached is not None:
                 results.append(cached)
             else:
                 results.append(None)  # Placeholder
-                cache_misses.append(text)
+                cache_misses.append(cache_key_text)
                 cache_miss_indices.append(idx)
 
         # Generate embeddings for cache misses
         if cache_misses:
             logger.info(f"Embedding cache: {len(texts) - len(cache_misses)}/{len(texts)} hits, generating {len(cache_misses)} new")
+            # cache_misses are already prefixed; pass straight to the base
+            # batch call (which does not re-prefix).
             new_embeddings = await super().generate_embeddings(cache_misses)
 
             # Store in cache and update results
-            for idx, text, embedding in zip(cache_miss_indices, cache_misses, new_embeddings):
+            for idx, cache_key_text, embedding in zip(
+                cache_miss_indices, cache_misses, new_embeddings
+            ):
                 await self.cache_manager.set_pickle(
                     embedding,
-                    text,
+                    cache_key_text,
                     self.provider,
                     self.model,
                     ttl=settings.cache_embedding_ttl

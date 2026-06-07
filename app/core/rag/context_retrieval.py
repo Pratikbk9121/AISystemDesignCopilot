@@ -4,7 +4,7 @@ Context Retrieval Module - Deep RAG Pipeline
 This module provides a single interface for retrieving Reference Patterns with quality assurance.
 It hides the complexity of multi-query retrieval, reranking, confidence scoring, and hallucination guard.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 import logging
 
@@ -30,8 +30,10 @@ class RetrievalResult:
     """
     patterns: List[str]  # Reference patterns content
     confidence: ConfidenceMetrics  # Quality indicators
-    guard_triggered: bool  # Whether Hallucination Guard blocked generation
+    guard_triggered: bool  # Whether Hallucination Guard hard-refused generation
     insufficient_response: Optional[str] = None  # Message when guard triggers
+    degraded: bool = False  # True when confidence was low but generation still proceeds
+    related_patterns: List[str] = field(default_factory=list)  # Topic names used as fallback reference
 
 
 class ContextRetrieval:
@@ -141,11 +143,34 @@ class ContextRetrieval:
             )
         else:
             reranked_results = results[:5]
-        
+
         # Step 3: Confidence Scoring
+        # When the cross-encoder is enabled, feed its scores back into the
+        # coverage signal so semantic coverage benefits from rerank quality.
+        cross_encoder_scores: Optional[List[float]] = None
+        if (
+            self.enable_reranking
+            and settings.enable_cross_encoder_rerank
+            and reranked_results
+        ):
+            try:
+                cross_encoder_scores = self.reranker.score_pairs(
+                    query=query,
+                    contents=[doc.content for doc, _ in reranked_results],
+                )
+                if not cross_encoder_scores:
+                    cross_encoder_scores = None
+            except Exception as exc:  # defensive — never fail retrieval
+                logger.warning(
+                    "score_pairs failed (%s); falling back to similarity coverage.",
+                    exc,
+                )
+                cross_encoder_scores = None
+
         confidence_metrics_dict = self.confidence_scorer.calculate_overall_confidence(
             query=query,
-            retrieved_docs=reranked_results
+            retrieved_docs=reranked_results,
+            cross_encoder_scores=cross_encoder_scores,
         )
         confidence_metrics = ConfidenceMetrics(**confidence_metrics_dict)
         
@@ -155,27 +180,37 @@ class ContextRetrieval:
             confidence_metrics.confidence_level
         )
         
-        # Step 4: Hallucination Guard
+        # Step 4: Hallucination Guard (3-state: proceed / degraded / refuse)
+        degraded = False
+        related_topics: List[str] = []
         if self.enable_guard:
-            should_proceed, insufficient_msg = await self.hallucination_guard.should_proceed_with_generation(
+            status, insufficient_msg, related_topics = await self.hallucination_guard.should_proceed_with_generation(
                 query=query,
                 retrieved_docs=reranked_results
             )
-            
-            if not should_proceed:
+
+            if status == "refuse":
                 logger.warning("⚠️  Hallucination Guard triggered - insufficient context")
                 return RetrievalResult(
                     patterns=[],
                     confidence=confidence_metrics,
                     guard_triggered=True,
-                    insufficient_response=insufficient_msg
+                    insufficient_response=insufficient_msg,
                 )
-        
-        # Success - extract pattern content
+            if status == "degraded":
+                logger.info(
+                    "Hallucination Guard degraded mode - generating with disclaimer (related: %s)",
+                    related_topics,
+                )
+                degraded = True
+
+        # Success (or degraded) - extract pattern content
         patterns = [doc.content for doc, score in reranked_results]
-        
+
         return RetrievalResult(
             patterns=patterns,
             confidence=confidence_metrics,
-            guard_triggered=False
+            guard_triggered=False,
+            degraded=degraded,
+            related_patterns=related_topics,
         )

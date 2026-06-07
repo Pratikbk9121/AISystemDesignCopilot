@@ -2,10 +2,13 @@
 Hallucination Guard for RAG responses
 Validates if retrieved context is sufficient before generating responses
 """
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Literal, Tuple, Dict, Any, Optional
 from app.core.rag.document_processor import Document
 from app.core.rag.confidence_scorer import ConfidenceScorer
 from app.core.knowledge_analyzer import KnowledgeAnalyzer
+
+
+GuardStatus = Literal["proceed", "degraded", "refuse"]
 
 
 class HallucinationGuard:
@@ -22,20 +25,26 @@ class HallucinationGuard:
         min_confidence_threshold: float = 0.3,
         min_documents: int = 1,
         min_similarity_threshold: float = 0.4,
+        degrade_lower_bound: float = 0.3,
         vector_store=None
     ):
         """
         Initialize hallucination guard
 
         Args:
-            min_confidence_threshold: Minimum confidence score to proceed
+            min_confidence_threshold: Minimum confidence score to proceed (above this → "proceed")
             min_documents: Minimum number of documents required
             min_similarity_threshold: Minimum similarity score for top document
+            degrade_lower_bound: Floor for degraded mode. Between this and
+                min_confidence_threshold we still generate but mark the
+                response as extrapolated (Perplexity-style "best effort"
+                UX). Below this we hard-refuse.
             vector_store: Optional vector store for suggesting similar topics
         """
         self.min_confidence_threshold = min_confidence_threshold
         self.min_documents = min_documents
         self.min_similarity_threshold = min_similarity_threshold
+        self.degrade_lower_bound = degrade_lower_bound
         self.confidence_scorer = ConfidenceScorer()
         self.knowledge_analyzer = KnowledgeAnalyzer(vector_store=vector_store) if vector_store else None
     
@@ -188,30 +197,64 @@ class HallucinationGuard:
         query: str,
         retrieved_docs: List[Tuple[Document, float]],
         force_generation: bool = False
-    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    ) -> Tuple[GuardStatus, Optional[Dict[str, Any]], List[str]]:
         """
-        Determine if generation should proceed or return "not enough data"
-        
+        Determine guard status: proceed, degraded, or refuse.
+
+        Status semantics:
+            - "proceed":  Confidence >= min_confidence_threshold. Generate normally.
+            - "degraded": Hard structural checks pass (min_documents,
+                          min_similarity_threshold) but overall confidence
+                          is in [degrade_lower_bound, min_confidence_threshold).
+                          Still generate, but caller should label the
+                          response as extrapolated from related patterns.
+            - "refuse":   Hard checks fail OR confidence < degrade_lower_bound.
+                          Do not generate; return insufficient-context response.
+
         Args:
             query: User query
             retrieved_docs: Retrieved documents
             force_generation: If True, bypass checks (for testing/debugging)
-        
+
         Returns:
-            Tuple of (should_proceed, insufficient_context_response)
-            - If should_proceed is True, insufficient_context_response is None
-            - If should_proceed is False, insufficient_context_response contains error details
+            Tuple of (status, context_dict, related_topics)
+            - status="proceed":  context_dict is None, related_topics is []
+            - status="degraded": context_dict is None, related_topics is the
+                                 list of suggested similar topic names
+            - status="refuse":   context_dict carries the insufficient-context
+                                 response payload, related_topics is []
         """
         if force_generation:
-            return True, None
-        
+            return "proceed", None, []
+
         validation_result = self.check_context_sufficiency(query, retrieved_docs)
-        
-        if not validation_result["is_sufficient"]:
-            insufficient_response = await self.create_insufficient_context_response(
-                query,
-                validation_result
-            )
-            return False, insufficient_response
-        
-        return True, None
+
+        if validation_result["is_sufficient"]:
+            return "proceed", None, []
+
+        # Insufficient. Decide: degrade (soft) vs refuse (hard).
+        # Only the overall_confidence check is eligible for degradation —
+        # the structural min_documents / min_similarity_threshold checks
+        # signal we have no usable patterns at all and must hard-refuse.
+        confidence_details = validation_result.get("confidence_details")
+        if confidence_details is not None:
+            conf = float(confidence_details.get("overall_confidence", 0.0))
+            if conf >= self.degrade_lower_bound:
+                # Degraded mode: pull related topics for the disclaimer.
+                related_topics: List[str] = []
+                if self.knowledge_analyzer:
+                    try:
+                        related_topics = await self.knowledge_analyzer.suggest_similar_topics(
+                            query, top_k=3
+                        )
+                    except Exception:
+                        # Best-effort — degraded mode still proceeds without topics.
+                        related_topics = []
+                return "degraded", None, related_topics
+
+        # Hard refuse — either structural failure or confidence below floor.
+        insufficient_response = await self.create_insufficient_context_response(
+            query,
+            validation_result
+        )
+        return "refuse", insufficient_response, []

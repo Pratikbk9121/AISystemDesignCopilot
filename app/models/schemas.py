@@ -217,6 +217,14 @@ class SystemDesignResponse(BaseModel):
         default=None,
         description="Warning message for medium-confidence responses (0.3-0.6 range)"
     )
+    degraded_mode: bool = Field(
+        default=False,
+        description="True when confidence was low but we still generated using related patterns as inspiration"
+    )
+    related_patterns: list[str] = Field(
+        default_factory=list,
+        description="Topic names used as fallback reference patterns when in degraded mode"
+    )
     revision_count: int = Field(
         default=0,
         description="Number of reflection/revise passes performed (0 = first-shot design)"

@@ -192,16 +192,25 @@ class SystemDesignGraph:
             logger.warning("Hallucination guard triggered for query: %s", query[:60])
             return {
                 "retrieved_documents": [],
-                "confidence_metrics": result.confidence.dict(),
+                "confidence_metrics": result.confidence.model_dump(mode="json"),
                 "hallucination_guard_triggered": True,
                 "insufficient_context_response": result.insufficient_response,
                 "current_step": "retrieve_context",
             }
 
+        if result.degraded:
+            logger.info(
+                "Degraded retrieval for query '%s' - generating with disclaimer (related: %s)",
+                query[:60],
+                result.related_patterns,
+            )
+
         return {
             "retrieved_documents": result.patterns,
-            "confidence_metrics": result.confidence.dict(),
+            "confidence_metrics": result.confidence.model_dump(mode="json"),
             "hallucination_guard_triggered": False,
+            "degraded_context": result.degraded,
+            "related_patterns": result.related_patterns,
             "current_step": "retrieve_context",
         }
 
@@ -275,7 +284,7 @@ class SystemDesignGraph:
             )
 
         return {
-            "architecture_json": architecture.dict(),
+            "architecture_json": architecture.model_dump(mode="json"),
             "explanation": explanation,
             "tool_calls": tool_calls,
             "current_step": "generate_design",
@@ -297,7 +306,7 @@ class SystemDesignGraph:
             prompt=user_prompt, system_message=system_message
         )
         evaluation = self.parser.parse_evaluation(response)
-        eval_dict = evaluation.dict()
+        eval_dict = evaluation.model_dump(mode="json")
 
         return {
             "evaluation_json": eval_dict,
@@ -342,7 +351,7 @@ class SystemDesignGraph:
         logger.info("Revision %d complete", revision_count)
 
         return {
-            "architecture_json": architecture.dict(),
+            "architecture_json": architecture.model_dump(mode="json"),
             "explanation": explanation,
             "revision_count": revision_count,
             "current_step": "revise_design",
@@ -350,11 +359,15 @@ class SystemDesignGraph:
 
     async def _finalize(self, state: SystemDesignState) -> Dict[str, Any]:
         """Snapshot token usage and mark the run complete."""
-        usage = self.llm_client.get_token_usage().dict()
+        usage = self.llm_client.get_token_usage().model_dump(mode="json")
         return {
             "token_usage": usage,
             "current_step": "finalize",
             "error": None,
+            # Propagate degraded-mode signals into final_state so the
+            # orchestrator can surface them in the response.
+            "degraded_context": state.get("degraded_context", False),
+            "related_patterns": state.get("related_patterns", []),
         }
 
     # ------------------------------------------------------------------
@@ -371,6 +384,18 @@ class SystemDesignGraph:
     def _build_design_prompt(self, state: SystemDesignState) -> tuple[str, str]:
         """Return (system_message, user_prompt) for the initial generation."""
         retrieved_context = "\n\n".join(state.get("retrieved_documents", []))
+        # Degraded mode: prepend a disclaimer so the LLM treats the
+        # reference patterns as loose inspiration rather than authoritative
+        # source. The user-facing warning is added later in the orchestrator.
+        if state.get("degraded_context"):
+            related = state.get("related_patterns") or []
+            related_str = ", ".join(related) if related else "no exact matches"
+            retrieved_context = (
+                f"\n\nNOTE: The reference patterns below are from related but "
+                f"not exact-match systems ({related_str}). Use them as inspiration, "
+                f"not authoritative source.\n\n"
+                + retrieved_context
+            )
         history_str = self._format_history(state.get("messages", []))
         additional_context = state.get("additional_context") or {}
         context_str = (
@@ -432,6 +457,8 @@ class SystemDesignGraph:
             "hallucination_guard_triggered": False,
             "insufficient_context_response": {},
             "confidence_metrics": {},
+            "degraded_context": False,
+            "related_patterns": [],
         }
 
     async def run(
@@ -457,7 +484,7 @@ class SystemDesignGraph:
             initial["current_step"] = "error"
             # Best-effort token snapshot even on failure.
             try:
-                initial["token_usage"] = self.llm_client.get_token_usage().dict()
+                initial["token_usage"] = self.llm_client.get_token_usage().model_dump(mode="json")
             except Exception:
                 pass
             return initial
@@ -504,11 +531,35 @@ class SystemDesignGraph:
 
                     if node_name == "retrieve_context":
                         if update.get("hallucination_guard_triggered"):
+                            # Surface the rich "Not enough data" payload to
+                            # streaming clients — same shape sync callers get
+                            # via SystemDesignResponse.knowledge_gap_details.
+                            # We intentionally do NOT also emit an `error`
+                            # event here: this is a user-data condition, not
+                            # a system failure, and emitting both confused
+                            # the frontend parser.
+                            insufficient_response = (
+                                update.get("insufficient_context_response") or {}
+                            )
                             yield {
-                                "type": "error",
+                                "type": "insufficient_knowledge",
                                 "data": {
-                                    "message": "Insufficient context to generate design",
-                                    "step": "retrieve_context",
+                                    "message": insufficient_response.get(
+                                        "message", "Not enough data"
+                                    ),
+                                    "explanation": insufficient_response.get("explanation"),
+                                    "validation_details": insufficient_response.get(
+                                        "validation_details"
+                                    ),
+                                    "available_topics": insufficient_response.get(
+                                        "available_topics", []
+                                    ),
+                                    "similar_topics": insufficient_response.get(
+                                        "similar_topics", []
+                                    ),
+                                    "example_queries": insufficient_response.get(
+                                        "example_queries", []
+                                    ),
                                 },
                             }
                         else:
@@ -519,6 +570,17 @@ class SystemDesignGraph:
                                     "message": f"Retrieved {len(update.get('retrieved_documents', []))} documents",
                                 },
                             }
+                            if update.get("degraded_context"):
+                                yield {
+                                    "type": "degraded",
+                                    "data": {
+                                        "related_patterns": update.get("related_patterns", []),
+                                        "message": (
+                                            "Low confidence in retrieved context — "
+                                            "generating with disclaimer using related patterns."
+                                        ),
+                                    },
+                                }
 
                     elif node_name == "detect_intent":
                         yield {

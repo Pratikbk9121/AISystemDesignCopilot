@@ -207,11 +207,7 @@ class RedisConversationStateManager(ConversationStateManager):
         if not await self._ensure_redis():
             return await super().save_conversation(session_id, conversation)
 
-        conversation_data = (
-            conversation.model_dump()
-            if hasattr(conversation, "model_dump")
-            else conversation.dict()
-        )
+        conversation_data = conversation.model_dump(mode="json")
         await self.cache_manager.set_json(
             conversation_data, session_id, ttl=settings.cache_conversation_ttl
         )

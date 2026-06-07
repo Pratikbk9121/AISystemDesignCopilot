@@ -150,7 +150,7 @@ class Settings(BaseSettings):
 
     # Evaluation Settings
     enable_evaluation: bool = False  # ✅ DISABLED by default - Saves 3-7s (opt-in via request param)
-    confidence_threshold: float = 0.7
+    confidence_threshold: float = 0.5
 
     # Reflection / revise-loop settings
     # When evaluator confidence falls below the threshold the graph routes
@@ -160,6 +160,30 @@ class Settings(BaseSettings):
         default=0.7, alias="REFLECTION_CONFIDENCE_THRESHOLD"
     )
     max_revisions: int = Field(default=2, alias="MAX_REVISIONS")
+
+    # Modern RAG feature flags. The hybrid retrieval + cross-encoder rerank +
+    # degrade-mode stack is the Wave 1A overhaul that replaces the old
+    # bi-encoder-only path. Flags are on by default but kept togglable so a
+    # rollback is one env-var away.
+    enable_hybrid_retrieval: bool = Field(
+        default=True, alias="ENABLE_HYBRID_RETRIEVAL"
+    )
+    enable_cross_encoder_rerank: bool = Field(
+        default=True, alias="ENABLE_CROSS_ENCODER_RERANK"
+    )
+    reranker_model: str = Field(
+        default="BAAI/bge-reranker-v2-m3", alias="RERANKER_MODEL"
+    )
+    # When true, queries that score between degrade_mode_lower_bound and
+    # confidence_threshold still produce a generated design (with a
+    # "extrapolated from related patterns" disclaimer) instead of a hard
+    # refusal. Below degrade_mode_lower_bound the guard still refuses.
+    low_confidence_degrade_mode: bool = Field(
+        default=True, alias="LOW_CONFIDENCE_DEGRADE_MODE"
+    )
+    degrade_mode_lower_bound: float = Field(
+        default=0.3, alias="DEGRADE_MODE_LOWER_BOUND"
+    )
 
     # Function-calling / tool-use settings
     # When enabled, the architecture-generation pass receives the registered

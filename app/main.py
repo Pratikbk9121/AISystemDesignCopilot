@@ -162,6 +162,22 @@ async def lifespan(app: FastAPI):
             except Exception:  # noqa: BLE001
                 pass
 
+        # Structured post-seed boot log. Emitted AFTER any auto-seed pass so
+        # the points count reflects the live state we'll actually serve from.
+        # Wave 2D: makes a regression (e.g. baked image shipping an empty
+        # collection) loud at boot — no need to wait for the first query to
+        # see "zero retrieval hits".
+        try:
+            info = vector_store.get_collection_info()
+            logger.info(
+                "qdrant.boot collection=%s points=%d hybrid=%s",
+                info.get("collection_name"),
+                int(info.get("points_count") or 0),
+                info.get("hybrid"),
+            )
+        except Exception as e:  # noqa: BLE001 — diagnostic only.
+            logger.warning("qdrant.boot log failed: %s", e)
+
         qdrant_status = f"ok(points={points_count})"
     except Exception as e:
         if settings.qdrant_required_on_startup:

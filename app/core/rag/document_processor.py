@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Literal
 from langchain_core.documents import Document as LangChainDocument
 from langchain_text_splitters import (
     CharacterTextSplitter,
+    MarkdownHeaderTextSplitter,
     MarkdownTextSplitter,
     RecursiveCharacterTextSplitter,
 )
@@ -17,6 +18,16 @@ from langchain_text_splitters import (
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Header-aware markdown chunking defaults.
+# These are intentionally smaller than the global ``settings.chunk_size`` /
+# ``settings.chunk_overlap`` (currently 1000/200) because markdown sections are
+# short and denser retrieval works better for header-segmented content. The
+# legacy settings constants are preserved for the non-markdown fallback path
+# so backward compatibility is maintained.
+MARKDOWN_CHUNK_SIZE = 512
+MARKDOWN_CHUNK_OVERLAP = 128
+MARKDOWN_HEADERS_TO_SPLIT_ON = [("#", "h1"), ("##", "h2")]
 
 
 class Document:
@@ -203,7 +214,16 @@ class DocumentProcessor:
 
     def _load_file(self, file_path: Path) -> List[Document]:
         """
-        Load a single file and chunk it using LangChain loaders
+        Load a single file and chunk it using LangChain loaders.
+
+        For ``.md`` files we use a two-stage strategy:
+          1. ``MarkdownHeaderTextSplitter`` splits on H1/H2 and stamps the
+             header path (``h1``, ``h2``) onto each section as metadata.
+          2. ``RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=128)``
+             further splits each section so embeddings stay dense.
+
+        For ``.txt`` and ``.json`` files we keep the existing flat character
+        splitter to avoid regressing non-markdown ingestion.
 
         Args:
             file_path: Path to the file
@@ -230,17 +250,9 @@ class DocumentProcessor:
 
             # Use appropriate splitter based on file type
             if file_path.suffix == ".md":
-                # Use Markdown splitter for .md files
-                markdown_splitter = MarkdownTextSplitter(
-                    chunk_size=self.chunk_size,
-                    chunk_overlap=self.chunk_overlap,
-                )
-                lc_documents = markdown_splitter.create_documents(
-                    texts=[text],
-                    metadatas=[metadata]
-                )
+                lc_documents = self._split_markdown(text, metadata)
             else:
-                # Use configured splitter for other files
+                # Use configured splitter for other files (.txt / .json)
                 lc_documents = self.text_splitter.create_documents(
                     texts=[text],
                     metadatas=[metadata]
@@ -264,6 +276,67 @@ class DocumentProcessor:
         except Exception as e:
             logger.error("Error loading file %s: %s", file_path, e, exc_info=True)
             return []
+
+    def _split_markdown(
+        self,
+        text: str,
+        base_metadata: Dict[str, Any],
+    ) -> List[LangChainDocument]:
+        """
+        Two-stage header-aware markdown chunking.
+
+        Stage 1: ``MarkdownHeaderTextSplitter`` splits on H1/H2 and tags each
+        section with ``h1`` / ``h2`` metadata. ``strip_headers=False`` keeps
+        the header text inside the chunk so it remains searchable.
+
+        Stage 2: ``RecursiveCharacterTextSplitter`` further splits each
+        section into 512-char chunks with 128-char overlap.
+
+        If the markdown contains no recognized headers, the splitter returns
+        an empty list — we fall back to the recursive splitter alone so the
+        document is still ingested.
+
+        Args:
+            text: Raw markdown text
+            base_metadata: Per-file metadata (source, file_name, file_type)
+
+        Returns:
+            List of LangChain Documents, each carrying merged metadata
+            (base + header path).
+        """
+        header_splitter = MarkdownHeaderTextSplitter(
+            headers_to_split_on=MARKDOWN_HEADERS_TO_SPLIT_ON,
+            strip_headers=False,
+        )
+        recursive_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=MARKDOWN_CHUNK_SIZE,
+            chunk_overlap=MARKDOWN_CHUNK_OVERLAP,
+            separators=["\n\n", "\n", ". ", " ", ""],
+            length_function=len,
+        )
+
+        sections = header_splitter.split_text(text)
+
+        # Fallback: no headers detected — just do flat recursive splitting
+        # so we don't silently drop the file.
+        if not sections:
+            return recursive_splitter.create_documents(
+                texts=[text],
+                metadatas=[base_metadata],
+            )
+
+        out: List[LangChainDocument] = []
+        for section in sections:
+            # MarkdownHeaderTextSplitter returns Documents whose .metadata
+            # holds the header path (e.g. {"h1": "...", "h2": "..."}).
+            section_metadata = {**base_metadata, **section.metadata}
+            sub_docs = recursive_splitter.create_documents(
+                texts=[section.page_content],
+                metadatas=[section_metadata],
+            )
+            out.extend(sub_docs)
+
+        return out
 
     def get_splitter(self):
         """

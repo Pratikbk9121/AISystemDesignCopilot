@@ -77,8 +77,18 @@ def test_short_doc_gets_length_penalty():
 
 
 @pytest.mark.asyncio
-async def test_diversity_penalty_drops_near_duplicate():
-    """Two near-identical embeddings → the second gets penalized."""
+async def test_diversity_penalty_drops_near_duplicate(monkeypatch):
+    """Two near-identical embeddings → the second gets penalized.
+
+    Wave 2B note: this test exercises the diversity/MMR pass in isolation
+    by disabling the cross-encoder so the synthetic initial scores survive
+    into the diversity stage. The cross-encoder path is covered by the
+    integration smoke check, not here.
+    """
+    from app.core.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "enable_cross_encoder_rerank", False)
+
     # Use orthogonal-ish vectors so we can predict diversity behavior.
     vec_a = np.array([1.0, 0.0, 0.0])
     vec_b_near = np.array([0.99, 0.05, 0.0])  # near-duplicate of A

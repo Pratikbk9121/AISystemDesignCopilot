@@ -31,9 +31,12 @@ RUN python -c "from fastembed import SparseTextEmbedding; SparseTextEmbedding('Q
 # Bake the Qdrant index into the image so the live container has knowledge
 # from t=0 — no "did bootstrap succeed at boot?" risk. We force on-disk mode
 # here because the in-memory index would vanish when this RUN step exits.
+# TEKION_LLM_KEY is set to a non-placeholder dummy purely to satisfy Settings
+# validation during this build step; the script only touches Qdrant + the
+# embedding model and never calls the LLM. The real key is injected at runtime.
 ENV QDRANT_USE_MEMORY=false
 ENV QDRANT_PATH=/app/data/vector_store/qdrant_data
-RUN python scripts/initialize_qdrant.py --clear
+RUN TEKION_LLM_KEY=build-time-unused python scripts/initialize_qdrant.py --clear
 
 # Run
 EXPOSE 7860

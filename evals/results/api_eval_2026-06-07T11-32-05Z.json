@@ -1,0 +1,146 @@
+{
+  "timestamp": "2026-06-07T11-32-05Z",
+  "base_url": "http://localhost:8000",
+  "results": [
+    {
+      "id": "q1-url-shortener",
+      "query": "Design a URL shortener like bit.ly",
+      "bucket": "in-corpus",
+      "ok": true,
+      "error": null,
+      "latency_ms": 15580,
+      "judge": {
+        "completeness": 9,
+        "scalability_reasoning": 8,
+        "tradeoff_coverage": 9,
+        "factuality": 9,
+        "tool_used": false,
+        "appropriate_tool_use": true,
+        "guard_triggered_correctly": null,
+        "one_line_critique": "The candidate's response is comprehensive, but could benefit from more specific numbers and concrete examples to support the scaling strategy.",
+        "overall": 8.75
+      },
+      "confidence": 0.646,
+      "confidence_level": "MEDIUM",
+      "degraded_mode": false,
+      "insufficient_knowledge": false,
+      "related_patterns": [],
+      "tokens": 2250,
+      "revision_count": 0,
+      "num_services": 5,
+      "num_tradeoffs": 2
+    },
+    {
+      "id": "q2-twitter-feed",
+      "query": "Design Twitter's news feed with fan-out vs fan-in",
+      "bucket": "in-corpus",
+      "ok": true,
+      "error": null,
+      "latency_ms": 15442,
+      "judge": {
+        "completeness": 9,
+        "scalability_reasoning": 8,
+        "tradeoff_coverage": 9,
+        "factuality": 9,
+        "tool_used": false,
+        "appropriate_tool_use": true,
+        "guard_triggered_correctly": null,
+        "one_line_critique": "The response could benefit from more concrete numbers and specific examples to support the scaling strategy and performance claims.",
+        "overall": 8.75
+      },
+      "confidence": 0.497,
+      "confidence_level": "LOW",
+      "degraded_mode": true,
+      "insufficient_knowledge": false,
+      "related_patterns": [],
+      "tokens": 2160,
+      "revision_count": 0,
+      "num_services": 6,
+      "num_tradeoffs": 2
+    },
+    {
+      "id": "q3-whatsapp-e2ee",
+      "query": "Design WhatsApp end-to-end encrypted messaging",
+      "bucket": "in-corpus",
+      "ok": true,
+      "error": null,
+      "latency_ms": 41413,
+      "judge": {
+        "completeness": 8,
+        "scalability_reasoning": 9,
+        "tradeoff_coverage": 7,
+        "factuality": 9,
+        "tool_used": true,
+        "appropriate_tool_use": false,
+        "guard_triggered_correctly": null,
+        "one_line_critique": "The candidate provided a thorough architecture but incorrectly used the estimate_capacity tool despite being given no concrete scale numbers.",
+        "overall": 8.25
+      },
+      "confidence": 0.575,
+      "confidence_level": "LOW",
+      "degraded_mode": true,
+      "insufficient_knowledge": false,
+      "related_patterns": [],
+      "tokens": 4083,
+      "revision_count": 0,
+      "num_services": 3,
+      "num_tradeoffs": 1
+    },
+    {
+      "id": "q4-instagram",
+      "query": "Design Instagram with stories and reels",
+      "bucket": "in-corpus",
+      "ok": false,
+      "error": "HTTP 500: {\"detail\":\"Internal server error\"}",
+      "latency_ms": 51285,
+      "judge": null
+    },
+    {
+      "id": "q5-pinterest",
+      "query": "Design Pinterest with boards and image discovery",
+      "bucket": "near-corpus",
+      "ok": false,
+      "error": "HTTP 500: {\"detail\":\"Internal server error\"}",
+      "latency_ms": 46837,
+      "judge": null
+    },
+    {
+      "id": "q6-discord",
+      "query": "Design Discord with channels and voice rooms",
+      "bucket": "near-corpus",
+      "ok": true,
+      "error": null,
+      "latency_ms": 43618,
+      "judge": {
+        "error": "RateLimitError: Error code: 429 - {'error': {'message': 'Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01ktgw293seexbe2cec7akkfwe` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 98845, Requested 2450. Please try again in 18m38.88s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "confidence": 0.66,
+      "confidence_level": "MEDIUM",
+      "degraded_mode": false,
+      "insufficient_knowledge": false,
+      "related_patterns": [],
+      "tokens": 4524,
+      "revision_count": 0,
+      "num_services": 7,
+      "num_tradeoffs": 2
+    },
+    {
+      "id": "q7-stock-exchange",
+      "query": "Design a stock exchange order matching engine",
+      "bucket": "out-of-corpus",
+      "ok": false,
+      "error": "HTTP 500: {\"detail\":\"Internal server error\"}",
+      "latency_ms": 12915,
+      "judge": null
+    },
+    {
+      "id": "q8-submarine-sonar",
+      "query": "Design an underwater submarine sonar telemetry pipeline",
+      "bucket": "far-out-of-corpus",
+      "ok": false,
+      "error": "HTTP 500: {\"detail\":\"Internal server error\"}",
+      "latency_ms": 6268,
+      "judge": null
+    }
+  ]
+}
